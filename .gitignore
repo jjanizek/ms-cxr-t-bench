@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.so
+
+# Environments
+.env
+.venv
+env/
+venv/
+
+# Data — raw images and large binary caches are not versioned
+data/raw/
+data/features/
+data/splits/
+
+# Generated outputs
+results/
+logs/
+*.log
+
+# Jupyter
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Model checkpoints (saved during fine-tuning)
+checkpoints/
+*.pt
+*.pth
+
+# OS
+.DS_Store
