@@ -1,0 +1,23 @@
+model:
+  name: google_cxr
+  kwargs:
+    hf_cache_dir: null   # set to a local path to avoid re-downloading
+
+protocol: A
+seeds: [42, 123, 456, 789]
+device: cpu  # model is TF-only; features are extracted offline
+
+# Preferred workflow: run extract_google_cxr_features.py first, then train.py
+# will load the cached .npy files without needing TensorFlow installed.
+# features_preextracted: true means train.py skips image loading entirely.
+features_preextracted: true
+
+data:
+  labels: data/raw/ms_cxr_t_labels.csv
+  metadata: data/raw/mimic_metadata.csv
+  images_root: data/raw/images
+
+probe_kwargs:
+  lr: 1.0e-3
+  epochs: 100
+  batch_size: 64

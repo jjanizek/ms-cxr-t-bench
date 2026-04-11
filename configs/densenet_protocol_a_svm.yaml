@@ -1,0 +1,18 @@
+model:
+  name: densenet_baseline
+  kwargs:
+    freeze: true
+
+protocol: A
+probe_type: svm
+features_preextracted: true
+seeds: [42, 123, 456, 789]
+device: cpu  # SVM runs on CPU
+
+data:
+  labels: data/raw/ms_cxr_t_labels.csv
+  metadata: data/raw/mimic_metadata.csv
+  images_root: data/raw/images
+
+probe_kwargs:
+  C: 1.0

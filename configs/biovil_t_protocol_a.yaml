@@ -1,0 +1,21 @@
+model:
+  name: biovil_t
+  kwargs: {}
+
+protocol: A
+features_preextracted: true
+seeds: [42, 123, 456, 789]
+device: cuda
+
+data:
+  labels: data/raw/ms_cxr_t_labels.csv
+  metadata: data/raw/mimic_metadata.csv
+  images_root: data/raw/images
+  finding_col: category
+  label_col: progression
+  subject_col: subject_id
+
+probe_kwargs:
+  lr: 1.0e-3
+  epochs: 100
+  batch_size: 64

@@ -1,0 +1,22 @@
+model:
+  name: densenet_baseline
+  kwargs:
+    freeze: true
+
+protocol: A
+probe_type: mlp
+features_preextracted: true
+seeds: [42, 123, 456, 789]
+device: cuda
+
+data:
+  labels: data/raw/ms_cxr_t_labels.csv
+  metadata: data/raw/mimic_metadata.csv
+  images_root: data/raw/images
+
+probe_kwargs:
+  lr: 1.0e-3
+  epochs: 200
+  batch_size: 64
+  hidden_dims: [512, 256]
+  dropout: 0.3

@@ -1,0 +1,19 @@
+# Core
+torch>=2.0
+torchvision>=0.15
+numpy>=1.24
+pandas>=2.0
+scikit-learn>=1.3
+PyYAML>=6.0
+Pillow>=9.0
+tqdm>=4.65
+
+# BioViL / BioViL-T (Microsoft)
+hi-ml-multimodal>=0.2
+
+# Optional: Google CXR Foundation
+# cxr_foundation  # install separately per Google Health instructions
+
+# External model dependencies (installed when repos are cloned)
+# MedST: see external/MedST/requirements.txt
+# ALTA: see external/ALTA/requirements.txt
