@@ -23,6 +23,9 @@ results/
 logs/
 *.log
 
+# Chest ImaGenome derived pairs (regenerate with scripts/extract_imagenome_pairs.py)
+data/imagenome_pairs/
+
 # Jupyter
 .ipynb_checkpoints/
 notebooks/.ipynb_checkpoints/
