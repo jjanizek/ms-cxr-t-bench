@@ -117,6 +117,15 @@ ms-cxr-t-bench/
 - Split strategy: subject-level, same seeds as Protocol A
 
 ## Task Status
+### Comparison plan for Task 1
+BioViL-T is a **temporal encoder** — it jointly encodes both images in a pair into one embedding. Google CXR and our model are **static encoders** — they encode each image independently and we concatenate the two embeddings. This is an architectural difference, not just a training-data difference. Fair comparison:
+
+- **Protocol A** (primary head-to-head): frozen encoder + MLP probe on MS-CXR-T 70/10/20 split. Same training data for all models; differences reflect representation quality only.
+  - BioViL-T: joint pair embedding → MLP
+  - Google CXR: concat(prior_emb, curr_emb) → MLP
+  - Our model: same as Google CXR (or temporal encoder variant if available)
+- **Paper replication**: BioViL-T fine-tuned end-to-end on ImaGenome, tested on full MS-CXR-T (Table 2). This is BioViL-T's best setting. To compare Google CXR and our model on equal footing, we would also fine-tune them end-to-end on ImaGenome pairs — but this is secondary since they weren't designed as temporal models.
+
 ### Task 1: Temporal Classification (MS-CXR-T)
 - [x] Protocol A harness (frozen encoder + linear/MLP/SVM probe, 4 seeds)
 - [x] BioViL-T Protocol A — frozen linear: 0.365, MLP: 0.401

@@ -32,7 +32,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.metrics import balanced_accuracy_score, f1_score
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -107,8 +106,15 @@ class ImaGenomePairDataset(torch.utils.data.Dataset):
         row = self.df.iloc[idx]
         curr_path = self.dicom_lookup[row["curr_dicom_id"]]
         prior_path = self.dicom_lookup[row["prior_dicom_id"]]
-        img_curr = self.transform(load_image(curr_path))
-        img_prior = self.transform(load_image(prior_path))
+        img_curr_pil = load_image(curr_path)
+        img_prior_pil = load_image(prior_path)
+        # Paper: "synchronise image data augmentations to apply identical transforms
+        # to the current and prior images" — fix RNG state so both get same spatial aug.
+        seed = torch.randint(0, 2**31, (1,)).item()
+        torch.manual_seed(seed)
+        img_curr = self.transform(img_curr_pil)
+        torch.manual_seed(seed)
+        img_prior = self.transform(img_prior_pil)
         return img_prior, img_curr, int(row["label"])
 
 
@@ -216,15 +222,19 @@ def train_one_finding(
     from torchvision import transforms
     from health_multimodal.image.data.transforms import create_chest_xray_transform_for_inference
 
-    # Training transform with augmentation (following paper)
+    # Training augmentation matching paper (Bannur et al., Appendix F):
+    # resize shorter edge → 512, center crop 448×448, random horizontal flip,
+    # random crop, affine (rotation ±30°, shear ±15°), color jitter, Gaussian noise.
+    # Spatial transforms are synchronised across prior/current images (see Dataset).
     train_transform = transforms.Compose([
+        transforms.Resize(512),          # shorter-edge resize to 512
+        transforms.RandomCrop(448),
         transforms.RandomHorizontalFlip(),
-        transforms.RandomAffine(degrees=10, translate=(0.1, 0.1), scale=(0.9, 1.1)),
+        transforms.RandomAffine(degrees=30, shear=15),
         transforms.ColorJitter(brightness=0.2, contrast=0.2),
-        transforms.Resize(512),
-        transforms.CenterCrop(448),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0)),
     ])
     val_transform = create_chest_xray_transform_for_inference(resize=512, center_crop_size=448)
 
@@ -269,11 +279,36 @@ def train_one_finding(
     # Phase 2: full fine-tuning
     for p in model.backbone_parameters():
         p.requires_grad_(True)
+
+    # Exempt positional encodings and missing-image embeddings from weight decay,
+    # matching paper ("as in [73]").
+    no_decay_names = {"position", "pos_embed", "missing_image"}
+    backbone_decay, backbone_no_decay = [], []
+    for name, param in model.encoder_model.named_parameters():
+        if any(nd in name for nd in no_decay_names):
+            backbone_no_decay.append(param)
+        else:
+            backbone_decay.append(param)
+
     opt = AdamW([
-        {"params": model.backbone_parameters(), "lr": backbone_lr},
-        {"params": model.head_parameters(), "lr": head_lr},
-    ], weight_decay=weight_decay)
-    scheduler = CosineAnnealingLR(opt, T_max=epochs)
+        {"params": backbone_decay,        "lr": backbone_lr, "weight_decay": weight_decay},
+        {"params": backbone_no_decay,     "lr": backbone_lr, "weight_decay": 0.0},
+        {"params": model.head_parameters(), "lr": head_lr,  "weight_decay": weight_decay},
+    ])
+
+    # Linear LR schedule: linear warmup for warmup_proportion of total steps,
+    # then linear decay to 0. Paper: warmup_proportion=0.03, 30 epochs.
+    total_steps = epochs * len(train_loader)
+    warmup_steps = int(total_steps * warmup_epochs / epochs)  # warmup_epochs≈0.03*30=~1
+
+    def lr_lambda(step):
+        if step < warmup_steps:
+            return step / max(1, warmup_steps)
+        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+        return max(0.0, 1.0 - progress)
+
+    from torch.optim.lr_scheduler import LambdaLR
+    scheduler = LambdaLR(opt, lr_lambda)
 
     best_val_acc = -1.0
     best_state = None
@@ -289,8 +324,8 @@ def train_one_finding(
             opt.zero_grad()
             loss.backward()
             opt.step()
+            scheduler.step()
             total_loss += loss.item()
-        scheduler.step()
 
         val_acc, val_f1 = evaluate(model, val_loader, device)
         if val_acc > best_val_acc:
