@@ -1,22 +1,22 @@
 """Download MIMIC-CXR-JPG images needed for Chest ImaGenome training.
 
 Reads data/imagenome_pairs/image_urls.tsv and downloads each image to
-/data/imagenome_images/ using 16 parallel threads.
+/data/imagenome_images/ using 16 parallel wget subprocesses.
 
-Safe to interrupt and re-run — already-downloaded files are skipped.
+wget handles PhysioNet's auth redirects correctly (requests does not).
+Safe to interrupt and re-run — already-downloaded files are skipped (-nc).
 
 Usage:
     python scripts/download_imagenome_images.py
-    python scripts/download_imagenome_images.py --workers 32 --dest /data/imagenome_images
+    python scripts/download_imagenome_images.py --workers 24 --dest /data/imagenome_images
 """
 import argparse
 import getpass
 import logging
-import sys
+import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-import requests
 from tqdm import tqdm
 
 logging.basicConfig(
@@ -26,23 +26,28 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def download_one(url: str, dest_path: Path, session: requests.Session) -> tuple[str, bool, str]:
-    """Download url → dest_path. Returns (filename, success, error_msg)."""
+def download_one(url: str, dest_path: Path, user: str, password: str) -> tuple[str, bool]:
+    """Download url → dest_path via wget. Returns (filename, success)."""
     fname = dest_path.name
     if dest_path.exists() and dest_path.stat().st_size > 0:
-        return fname, True, "skipped"
-    try:
-        resp = session.get(url, timeout=30, stream=True)
-        if resp.status_code == 200:
-            dest_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(dest_path, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=65536):
-                    f.write(chunk)
-            return fname, True, "ok"
-        else:
-            return fname, False, f"HTTP {resp.status_code}"
-    except Exception as e:
-        return fname, False, str(e)
+        return fname, True  # already done
+
+    result = subprocess.run(
+        [
+            "wget", "-q",
+            f"--user={user}",
+            f"--password={password}",
+            "-O", str(dest_path),
+            url,
+        ],
+        capture_output=True,
+    )
+    if result.returncode == 0 and dest_path.exists() and dest_path.stat().st_size > 0:
+        return fname, True
+    # Clean up zero-byte file on failure
+    if dest_path.exists() and dest_path.stat().st_size == 0:
+        dest_path.unlink()
+    return fname, False
 
 
 def main():
@@ -66,63 +71,57 @@ def main():
                 continue
             parts = line.split("\t")
             if len(parts) != 2:
-                logger.warning("Skipping malformed line: %r", line[:80])
                 continue
             url, fname = parts
             entries.append((url, dest / fname))
 
-    # Count already done
     already = sum(1 for _, p in entries if p.exists() and p.stat().st_size > 0)
-    logger.info(
-        "Total images: %d  Already downloaded: %d  Remaining: %d",
-        len(entries), already, len(entries) - already,
-    )
+    remaining = len(entries) - already
+    logger.info("Total: %d  Already done: %d  Remaining: %d", len(entries), already, remaining)
 
-    if already == len(entries):
+    if remaining == 0:
         logger.info("All images already downloaded.")
         return
 
     password = getpass.getpass(f"PhysioNet password for {args.physionet_user}: ")
 
-    session = requests.Session()
-    session.auth = (args.physionet_user, password)
-    # Verify credentials with a test request
-    test_url, _ = entries[0]
-    resp = session.head(test_url, timeout=10)
-    if resp.status_code == 401:
-        logger.error("Authentication failed — check username/password.")
-        sys.exit(1)
+    # Quick auth test
+    test_url, test_dest = next((u, p) for u, p in entries if not (p.exists() and p.stat().st_size > 0))
+    test_result = subprocess.run(
+        ["wget", "-q", "--spider", f"--user={args.physionet_user}", f"--password={password}", test_url],
+        capture_output=True,
+    )
+    if test_result.returncode != 0:
+        logger.error("Auth test failed (exit %d). Check your password.", test_result.returncode)
+        logger.error("wget stderr: %s", test_result.stderr.decode()[:200])
+        return
 
-    logger.info("Starting downloads with %d workers...", args.workers)
+    logger.info("Auth OK. Downloading with %d parallel workers...", args.workers)
     failures = []
-    completed = 0
+
+    todo = [(url, path) for url, path in entries if not (path.exists() and path.stat().st_size > 0)]
 
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {
-            pool.submit(download_one, url, path, session): fname
-            for url, path in entries
-            if not (path.exists() and path.stat().st_size > 0)
+            pool.submit(download_one, url, path, args.physionet_user, password): path.name
+            for url, path in todo
         }
         with tqdm(total=len(futures), desc="Downloading", unit="img") as pbar:
             for future in as_completed(futures):
-                fname, success, msg = future.result()
+                fname, success = future.result()
                 pbar.update(1)
-                completed += 1
                 if not success:
-                    failures.append((fname, msg))
+                    failures.append(fname)
                     pbar.set_postfix(fails=len(failures))
 
     total_done = sum(1 for _, p in entries if p.exists() and p.stat().st_size > 0)
-    logger.info(
-        "Done. %d/%d images in %s. %d failures.",
-        total_done, len(entries), dest, len(failures),
-    )
+    logger.info("Done. %d/%d images in %s. %d failures.", total_done, len(entries), dest, len(failures))
+
     if failures:
         fail_log = dest / "download_failures.txt"
         with open(fail_log, "w") as f:
-            for fname, msg in failures:
-                f.write(f"{fname}\t{msg}\n")
-        logger.warning("Failures written to %s", fail_log)
+            f.write("\n".join(failures) + "\n")
+        logger.warning("%d failures written to %s", len(failures), fail_log)
 
 
 if __name__ == "__main__":
