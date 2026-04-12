@@ -49,12 +49,54 @@ logger = logging.getLogger(__name__)
 # Dataset
 # ---------------------------------------------------------------------------
 
+def build_dicom_lookup(mimic_root: Path, dicom_to_path_csv: str = None) -> dict:
+    """Build dicom_id → absolute path mapping.
+
+    Supports two layouts:
+      1. Flat:       mimic_root/{dicom_id}.jpg
+      2. Hierarchical: mimic_root/physionet.org/files/mimic-cxr-jpg/2.1.0/files/p*/...
+         (the structure wget -r creates)
+
+    If dicom_to_path_csv is provided, uses the pre-computed relative path mapping
+    from extract_imagenome_pairs.py to avoid scanning the full tree.
+    """
+    import pandas as pd
+
+    lookup = {}
+
+    if dicom_to_path_csv and Path(dicom_to_path_csv).exists():
+        df = pd.read_csv(dicom_to_path_csv)
+        # Try hierarchical wget layout first
+        # wget -r -P /data/mimic-cxr-jpg → /data/mimic-cxr-jpg/physionet.org/files/mimic-cxr-jpg/2.1.0/files/...
+        wget_prefix = mimic_root / "physionet.org" / "files" / "mimic-cxr-jpg" / "2.1.0"
+        for _, row in df.iterrows():
+            dicom_id = row["dicom_id"]
+            rel_path = row["rel_path"]  # e.g. files/p10/p10000032/s50414267/02aa804e-...jpg
+            if not rel_path:
+                continue
+            # Hierarchical layout
+            hier_path = wget_prefix / rel_path
+            if hier_path.exists():
+                lookup[dicom_id] = hier_path
+                continue
+            # Flat layout fallback
+            flat_path = mimic_root / f"{dicom_id}.jpg"
+            if flat_path.exists():
+                lookup[dicom_id] = flat_path
+        return lookup
+
+    # No CSV — fall back to flat layout
+    for jpg in mimic_root.glob("*.jpg"):
+        lookup[jpg.stem] = jpg
+    return lookup
+
+
 class ImaGenomePairDataset(torch.utils.data.Dataset):
     """(prior, current) pairs from Chest ImaGenome with optional augmentation."""
 
-    def __init__(self, df, images_root: str, transform):
+    def __init__(self, df, dicom_lookup: dict, transform):
         self.df = df.reset_index(drop=True)
-        self.images_root = Path(images_root)
+        self.dicom_lookup = dicom_lookup
         self.transform = transform
 
     def __len__(self):
@@ -63,8 +105,8 @@ class ImaGenomePairDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         from health_multimodal.image.data.io import load_image
         row = self.df.iloc[idx]
-        curr_path = self.images_root / f"{row['curr_dicom_id']}.jpg"
-        prior_path = self.images_root / f"{row['prior_dicom_id']}.jpg"
+        curr_path = self.dicom_lookup[row["curr_dicom_id"]]
+        prior_path = self.dicom_lookup[row["prior_dicom_id"]]
         img_curr = self.transform(load_image(curr_path))
         img_prior = self.transform(load_image(prior_path))
         return img_prior, img_curr, int(row["label"])
@@ -163,7 +205,7 @@ def evaluate(model, loader, device):
 
 def train_one_finding(
     df_train, df_val, df_test,
-    finding, seed, imagenome_images_root, mscxrt_images_root,
+    finding, seed, imagenome_lookup, mscxrt_images_root,
     device, epochs=30, warmup_epochs=3, batch_size=128,
     backbone_lr=1e-5, head_lr=1e-3, weight_decay=1e-4,
     patience=10, num_workers=8, class_weight=True, ckpt_dir=None,
@@ -186,8 +228,8 @@ def train_one_finding(
     ])
     val_transform = create_chest_xray_transform_for_inference(resize=512, center_crop_size=448)
 
-    train_ds = ImaGenomePairDataset(df_train, imagenome_images_root, train_transform)
-    val_ds = ImaGenomePairDataset(df_val, imagenome_images_root, val_transform)
+    train_ds = ImaGenomePairDataset(df_train, imagenome_lookup, train_transform)
+    val_ds = ImaGenomePairDataset(df_val, imagenome_lookup, val_transform)
     test_ds = MSCXRTPairDataset(df_test, mscxrt_images_root, val_transform)
 
     train_loader = DataLoader(
@@ -302,8 +344,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--train_pairs", default="data/imagenome_pairs/pairs_train.csv")
     parser.add_argument("--val_pairs", default="data/imagenome_pairs/pairs_val.csv")
+    parser.add_argument("--dicom_to_path_csv", default="data/imagenome_pairs/dicom_to_path.csv",
+                        help="CSV mapping dicom_id→rel_path (from extract_imagenome_pairs.py)")
     parser.add_argument("--mscxrt_labels", default="data/raw/ms_cxr_t_labels.csv")
-    parser.add_argument("--imagenome_images", default="/data/imagenome_images")
+    # Accept either flat (/data/imagenome_images) or wget-r hierarchy (/data/mimic-cxr-jpg)
+    parser.add_argument("--imagenome_images", default="/data/mimic-cxr-jpg",
+                        help="Root of MIMIC-CXR-JPG images (flat or wget -r hierarchy)")
     parser.add_argument("--mscxrt_images", default="data/raw/images")
     parser.add_argument("--seeds", nargs="+", type=int, default=[42, 123, 456, 789])
     parser.add_argument("--seed", type=int, default=None)
@@ -333,6 +379,13 @@ def main():
         "ImaGenome train: %d pairs, val: %d pairs", len(df_train_all), len(df_val_all)
     )
 
+    # Build dicom_id → path lookup (handles both flat and wget-r hierarchy)
+    logger.info("Building image lookup from %s ...", args.imagenome_images)
+    imagenome_lookup = build_dicom_lookup(
+        Path(args.imagenome_images), args.dicom_to_path_csv
+    )
+    logger.info("Image lookup: %d entries", len(imagenome_lookup))
+
     # Load MS-CXR-T (full dataset as fixed test set)
     df_test_all = load_labels(args.mscxrt_labels, images_root=args.mscxrt_images)
     logger.info("MS-CXR-T test: %d pairs", len(df_test_all))
@@ -346,8 +399,18 @@ def main():
         df_va = df_val_all[df_val_all["finding"] == finding].copy()
         df_te = df_test_all[df_test_all["finding"] == finding].copy()
 
+        # Filter to pairs where both images are available
+        df_tr = df_tr[
+            df_tr["curr_dicom_id"].isin(imagenome_lookup) &
+            df_tr["prior_dicom_id"].isin(imagenome_lookup)
+        ].copy()
+        df_va = df_va[
+            df_va["curr_dicom_id"].isin(imagenome_lookup) &
+            df_va["prior_dicom_id"].isin(imagenome_lookup)
+        ].copy()
+
         if len(df_tr) == 0:
-            logger.warning("No training pairs for %s, skipping", finding)
+            logger.warning("No training pairs with downloaded images for %s, skipping", finding)
             continue
         if len(df_te) == 0:
             logger.warning("No MS-CXR-T test pairs for %s, skipping", finding)
@@ -362,7 +425,7 @@ def main():
             result = train_one_finding(
                 df_tr, df_va, df_te,
                 finding=finding, seed=seed,
-                imagenome_images_root=args.imagenome_images,
+                imagenome_lookup=imagenome_lookup,
                 mscxrt_images_root=args.mscxrt_images,
                 device=args.device,
                 epochs=args.epochs,
