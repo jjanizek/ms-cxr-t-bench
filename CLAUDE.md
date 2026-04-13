@@ -87,10 +87,18 @@ ms-cxr-t-bench/
 │   ├── custom_labels.py  # Eval on our custom label set
 │   └── metrics.py        # Shared metric computation (macro-acc, F1, AUROC)
 ├── scripts/
-│   ├── train.py          # Main entrypoint: python scripts/train.py --config configs/X.yaml
-│   ├── evaluate.py       # Eval-only entrypoint
-│   ├── make_splits.py    # Generate and save subject-level splits
-│   └── run_sweep.py      # Run all model × protocol combos
+│   ├── train.py                              # Protocol A: frozen probe on MS-CXR-T splits
+│   ├── evaluate.py                           # Eval-only entrypoint
+│   ├── make_splits.py                        # Subject-level splits
+│   ├── run_sweep.py                          # All model × protocol combos
+│   ├── extract_biovil_t_features.py          # BioViL-T feature extraction (MS-CXR-T)
+│   ├── extract_google_cxr_features.py        # Google CXR feature extraction (MS-CXR-T)
+│   ├── extract_imagenome_pairs.py            # Parse ImaGenome scene graphs → training pairs
+│   ├── extract_google_cxr_imagenome_features.py  # Google CXR features for ImaGenome pairs
+│   ├── train_biovil_t_imagenome.py           # BioViL-T end-to-end fine-tune on ImaGenome
+│   ├── train_google_cxr_imagenome.py         # Google CXR frozen MLP probe on ImaGenome
+│   ├── train_finetune_imagenome_generic.py   # Generic PyTorch encoder fine-tune on ImaGenome
+│   └── eval_protocol_c_biovil_t.py          # Zero-shot evaluation
 ├── results/              # JSON: full config + metrics + seed + timestamp per run
 ├── notebooks/            # Analysis and visualization
 ├── requirements.txt
@@ -124,7 +132,7 @@ BioViL-T is a **temporal encoder** — it jointly encodes both images in a pair 
   - BioViL-T: joint pair embedding → MLP
   - Google CXR: concat(prior_emb, curr_emb) → MLP
   - Our model: same as Google CXR (or temporal encoder variant if available)
-- **Paper replication**: BioViL-T fine-tuned end-to-end on ImaGenome, tested on full MS-CXR-T (Table 2). This is BioViL-T's best setting. To compare Google CXR and our model on equal footing, we would also fine-tune them end-to-end on ImaGenome pairs — but this is secondary since they weren't designed as temporal models.
+- **ImaGenome-trained probe (Table 2 comparable)**: BioViL-T fine-tuned end-to-end on ImaGenome, tested on full MS-CXR-T (Table 2). For Google CXR (TF SavedModel, cannot fine-tune): extract frozen features for all ImaGenome pairs, then train an MLP probe — same spirit, frozen encoder. For our model: full end-to-end via `train_finetune_imagenome_generic.py`. All three tested on full MS-CXR-T (not a split).
 
 ### Task 1: Temporal Classification (MS-CXR-T)
 - [x] Protocol A harness (frozen encoder + linear/MLP/SVM probe, 4 seeds)
@@ -133,10 +141,14 @@ BioViL-T is a **temporal encoder** — it jointly encodes both images in a pair 
 - [x] BioViL-T Protocol C (zero-shot cosine similarity): 0.432
 - [x] BioViL-T end-to-end fine-tune on MS-CXR-T splits (Protocol A variant): ~0.363
 - [x] Chest ImaGenome pair extraction (93k pairs across 5 findings)
-- [ ] MIMIC-CXR-JPG images downloading → `/data/imagenome_images/` (~71k files)
-- [ ] BioViL-T trained on ImaGenome, tested on full MS-CXR-T (paper Table 2 replication)
+- [x] MIMIC-CXR-JPG images downloaded via gsutil rsync → `/data/mimic-cxr-jpg/` (~78% complete, 296k files / 451 GB)
+- [x] BioViL-T trained on ImaGenome, tested on full MS-CXR-T (seed 42): **avg macro_acc 0.612** (consolidation 0.646, edema 0.605, pleural_effusion 0.690, pneumonia 0.613, pneumothorax 0.508). Matches paper Table 2 (~0.617).
+- [ ] BioViL-T ImaGenome — remaining seeds [123, 456, 789] for error bars
+- [ ] Google CXR — extract ImaGenome features → `extract_google_cxr_imagenome_features.py`
+- [ ] Google CXR — frozen MLP probe trained on ImaGenome → `train_google_cxr_imagenome.py`
 - [ ] Google CXR Foundation Protocol A results (MLP probe)
 - [ ] Our foundation model — Protocol A
+- [ ] Our foundation model — ImaGenome fine-tune → `train_finetune_imagenome_generic.py`
 
 ### Task 2: Medical Device Classification
 - [ ] Radiologist labeling in progress (~1,600 images)

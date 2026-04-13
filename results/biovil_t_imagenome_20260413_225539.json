@@ -1,0 +1,127 @@
+{
+  "model": "biovil_t_imagenome",
+  "protocol": "paper_replication",
+  "description": "Trained on ImaGenome silver, tested on full MS-CXR-T (paper Table 2 replication)",
+  "git_hash": "ec350bc",
+  "timestamp": "20260413_225539",
+  "seeds": [
+    42
+  ],
+  "args": {
+    "train_pairs": "data/imagenome_pairs/pairs_train.csv",
+    "val_pairs": "data/imagenome_pairs/pairs_val.csv",
+    "dicom_to_path_csv": "data/imagenome_pairs/dicom_to_path.csv",
+    "mscxrt_labels": "data/raw/ms_cxr_t_labels.csv",
+    "imagenome_images": "/data/mimic-cxr-jpg",
+    "mscxrt_images": "data/raw/images",
+    "seeds": [
+      42,
+      123,
+      456,
+      789
+    ],
+    "seed": 42,
+    "finding": null,
+    "device": "cuda",
+    "epochs": 30,
+    "warmup_epochs": 3,
+    "batch_size": 32,
+    "grad_accum_steps": 4,
+    "no_amp": false,
+    "backbone_lr": 1e-05,
+    "head_lr": 0.001,
+    "patience": 10,
+    "no_class_weight": false,
+    "ckpt_dir": "checkpoints/biovil_t_imagenome",
+    "num_workers": 8
+  },
+  "results": [
+    {
+      "finding": "consolidation",
+      "seed": 42,
+      "macro_acc": 0.6464957264957265,
+      "macro_f1": 0.5961383864484641,
+      "best_val_macro_acc": 0.5890061087762434
+    },
+    {
+      "finding": "edema",
+      "seed": 42,
+      "macro_acc": 0.6045964787900271,
+      "macro_f1": 0.5995563861904665,
+      "best_val_macro_acc": 0.6129272274088522
+    },
+    {
+      "finding": "pleural_effusion",
+      "seed": 42,
+      "macro_acc": 0.6902314350020013,
+      "macro_f1": 0.638002206327177,
+      "best_val_macro_acc": 0.5980538142481945
+    },
+    {
+      "finding": "pneumonia",
+      "seed": 42,
+      "macro_acc": 0.613003663003663,
+      "macro_f1": 0.5864797507788162,
+      "best_val_macro_acc": 0.5467893284554767
+    },
+    {
+      "finding": "pneumothorax",
+      "seed": 42,
+      "macro_acc": 0.5075896262395118,
+      "macro_f1": 0.45799080172427614,
+      "best_val_macro_acc": 0.48418770050301996
+    }
+  ],
+  "summary": {
+    "consolidation": {
+      "macro_acc": {
+        "mean": 0.6464957264957265,
+        "std": NaN
+      },
+      "macro_f1": {
+        "mean": 0.5961383864484641,
+        "std": NaN
+      }
+    },
+    "edema": {
+      "macro_acc": {
+        "mean": 0.6045964787900271,
+        "std": NaN
+      },
+      "macro_f1": {
+        "mean": 0.5995563861904665,
+        "std": NaN
+      }
+    },
+    "pleural_effusion": {
+      "macro_acc": {
+        "mean": 0.6902314350020013,
+        "std": NaN
+      },
+      "macro_f1": {
+        "mean": 0.638002206327177,
+        "std": NaN
+      }
+    },
+    "pneumonia": {
+      "macro_acc": {
+        "mean": 0.613003663003663,
+        "std": NaN
+      },
+      "macro_f1": {
+        "mean": 0.5864797507788162,
+        "std": NaN
+      }
+    },
+    "pneumothorax": {
+      "macro_acc": {
+        "mean": 0.5075896262395118,
+        "std": NaN
+      },
+      "macro_f1": {
+        "mean": 0.45799080172427614,
+        "std": NaN
+      }
+    }
+  }
+}

@@ -42,3 +42,10 @@ checkpoints/
 
 # OS
 .DS_Store
+
+# Local Claude Code state
+.claude/
+
+# wget transient logs
+wget-log
+wget-log.*

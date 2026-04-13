@@ -51,10 +51,11 @@ logger = logging.getLogger(__name__)
 def build_dicom_lookup(mimic_root: Path, dicom_to_path_csv: str = None) -> dict:
     """Build dicom_id → absolute path mapping.
 
-    Supports two layouts:
-      1. Flat:       mimic_root/{dicom_id}.jpg
-      2. Hierarchical: mimic_root/physionet.org/files/mimic-cxr-jpg/2.1.0/files/p*/...
-         (the structure wget -r creates)
+    Supports three layouts:
+      1. Flat:     mimic_root/{dicom_id}.jpg
+      2. gsutil:   mimic_root/files/p*/p*/s*/{dicom_id}.jpg
+                   (gsutil rsync gs://physionet-open/mimic-cxr-jpg/2.1.0 {mimic_root})
+      3. wget -r:  mimic_root/physionet.org/files/mimic-cxr-jpg/2.1.0/files/p*/...
 
     If dicom_to_path_csv is provided, uses the pre-computed relative path mapping
     from extract_imagenome_pairs.py to avoid scanning the full tree.
@@ -65,23 +66,21 @@ def build_dicom_lookup(mimic_root: Path, dicom_to_path_csv: str = None) -> dict:
 
     if dicom_to_path_csv and Path(dicom_to_path_csv).exists():
         df = pd.read_csv(dicom_to_path_csv)
-        # Try hierarchical wget layout first
-        # wget -r -P /data/mimic-cxr-jpg → /data/mimic-cxr-jpg/physionet.org/files/mimic-cxr-jpg/2.1.0/files/...
         wget_prefix = mimic_root / "physionet.org" / "files" / "mimic-cxr-jpg" / "2.1.0"
         for _, row in df.iterrows():
             dicom_id = row["dicom_id"]
             rel_path = row["rel_path"]  # e.g. files/p10/p10000032/s50414267/02aa804e-...jpg
             if not rel_path:
                 continue
-            # Hierarchical layout
-            hier_path = wget_prefix / rel_path
-            if hier_path.exists():
-                lookup[dicom_id] = hier_path
-                continue
-            # Flat layout fallback
-            flat_path = mimic_root / f"{dicom_id}.jpg"
-            if flat_path.exists():
-                lookup[dicom_id] = flat_path
+            # Try layouts in order: gsutil → wget-r → flat
+            for candidate in (
+                mimic_root / rel_path,          # gsutil rsync layout
+                wget_prefix / rel_path,         # wget -r layout
+                mimic_root / f"{dicom_id}.jpg", # flat layout
+            ):
+                if candidate.exists():
+                    lookup[dicom_id] = candidate
+                    break
         return lookup
 
     # No CSV — fall back to flat layout
@@ -212,7 +211,8 @@ def evaluate(model, loader, device):
 def train_one_finding(
     df_train, df_val, df_test,
     finding, seed, imagenome_lookup, mscxrt_images_root,
-    device, epochs=30, warmup_epochs=3, batch_size=128,
+    device, epochs=30, warmup_epochs=3, batch_size=32,
+    grad_accum_steps=4, use_amp=True,
     backbone_lr=1e-5, head_lr=1e-3, weight_decay=1e-4,
     patience=10, num_workers=8, class_weight=True, ckpt_dir=None,
 ):
@@ -220,20 +220,21 @@ def train_one_finding(
     np.random.seed(seed)
 
     from torchvision import transforms
-    from health_multimodal.image.data.transforms import create_chest_xray_transform_for_inference
+    from health_multimodal.image.data.transforms import (
+        ExpandChannels,
+        create_chest_xray_transform_for_inference,
+    )
 
-    # Training augmentation matching paper (Bannur et al., Appendix F):
-    # resize shorter edge → 512, center crop 448×448, random horizontal flip,
-    # random crop, affine (rotation ±30°, shear ±15°), color jitter, Gaussian noise.
-    # Spatial transforms are synchronised across prior/current images (see Dataset).
+    # Training augmentation matching paper (Bannur et al., Appendix F).
+    # Match inference preprocessing (no ImageNet normalize; ExpandChannels 1→3).
     train_transform = transforms.Compose([
-        transforms.Resize(512),          # shorter-edge resize to 512
+        transforms.Resize(512),
         transforms.RandomCrop(448),
         transforms.RandomHorizontalFlip(),
         transforms.RandomAffine(degrees=30, shear=15),
         transforms.ColorJitter(brightness=0.2, contrast=0.2),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ExpandChannels(),
         transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0)),
     ])
     val_transform = create_chest_xray_transform_for_inference(resize=512, center_crop_size=448)
@@ -261,6 +262,8 @@ def train_one_finding(
     criterion = nn.CrossEntropyLoss(weight=criterion_weight)
 
     model = BioViLTClassifier().to(device)
+    amp_dtype = torch.float16 if use_amp else torch.float32
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     # Phase 1: warmup — head only
     for p in model.backbone_parameters():
@@ -270,11 +273,13 @@ def train_one_finding(
     for _ in range(warmup_epochs):
         model.train()
         for img_prior, img_curr, labels in train_loader:
-            logits = model(img_prior.to(device), img_curr.to(device))
-            loss = criterion(logits, labels.to(device))
+            with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                logits = model(img_prior.to(device), img_curr.to(device))
+                loss = criterion(logits, labels.to(device))
             opt_warmup.zero_grad()
-            loss.backward()
-            opt_warmup.step()
+            scaler.scale(loss).backward()
+            scaler.step(opt_warmup)
+            scaler.update()
 
     # Phase 2: full fine-tuning
     for p in model.backbone_parameters():
@@ -298,7 +303,8 @@ def train_one_finding(
 
     # Linear LR schedule: linear warmup for warmup_proportion of total steps,
     # then linear decay to 0. Paper: warmup_proportion=0.03, 30 epochs.
-    total_steps = epochs * len(train_loader)
+    steps_per_epoch = max(1, len(train_loader) // grad_accum_steps)
+    total_steps = epochs * steps_per_epoch
     warmup_steps = int(total_steps * warmup_epochs / epochs)  # warmup_epochs≈0.03*30=~1
 
     def lr_lambda(step):
@@ -318,14 +324,20 @@ def train_one_finding(
     for ep in range(epochs):
         model.train()
         total_loss = 0.0
-        for img_prior, img_curr, labels in tqdm(train_loader, desc=f"ep{ep+1}", leave=False):
-            logits = model(img_prior.to(device), img_curr.to(device))
-            loss = criterion(logits, labels.to(device))
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
-            scheduler.step()
-            total_loss += loss.item()
+        opt.zero_grad()
+        for step, (img_prior, img_curr, labels) in enumerate(
+            tqdm(train_loader, desc=f"ep{ep+1}", leave=False)
+        ):
+            with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                logits = model(img_prior.to(device), img_curr.to(device))
+                loss = criterion(logits, labels.to(device)) / grad_accum_steps
+            scaler.scale(loss).backward()
+            total_loss += loss.item() * grad_accum_steps
+            if (step + 1) % grad_accum_steps == 0:
+                scaler.step(opt)
+                scaler.update()
+                scheduler.step()
+                opt.zero_grad()
 
         val_acc, val_f1 = evaluate(model, val_loader, device)
         if val_acc > best_val_acc:
@@ -392,7 +404,11 @@ def main():
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--warmup_epochs", type=int, default=3)
-    parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--batch_size", type=int, default=32,
+                        help="Per-step batch size. Effective batch = batch_size * grad_accum_steps.")
+    parser.add_argument("--grad_accum_steps", type=int, default=4,
+                        help="Gradient accumulation (default 4 × batch 32 = paper effective 128).")
+    parser.add_argument("--no_amp", action="store_true", help="Disable mixed-precision training.")
     parser.add_argument("--backbone_lr", type=float, default=1e-5)
     parser.add_argument("--head_lr", type=float, default=1e-3)
     parser.add_argument("--patience", type=int, default=10)
@@ -466,6 +482,8 @@ def main():
                 epochs=args.epochs,
                 warmup_epochs=args.warmup_epochs,
                 batch_size=args.batch_size,
+                grad_accum_steps=args.grad_accum_steps,
+                use_amp=not args.no_amp,
                 backbone_lr=args.backbone_lr,
                 head_lr=args.head_lr,
                 patience=args.patience,

@@ -19,12 +19,25 @@ Detect acute findings relevant to ICU care (pneumothorax, consolidation, edema, 
 
 ## Models
 
-| Model | Temporal (Protocol A) | Device | Critical |
-|---|---|---|---|
-| BioViL-T (frozen MLP) | 0.401 macro-acc | planned | planned |
-| BioViL-T (ImaGenome fine-tune) | in progress | planned | planned |
-| Google CXR Foundation (frozen linear) | 0.397 | planned | planned |
-| Our foundation model | planned | planned | planned |
+| Model | Temporal (Protocol A) | Temporal (ImaGenome FT, full MS-CXR-T test) | Device | Critical |
+|---|---|---|---|---|
+| BioViL-T (frozen MLP) | 0.401 macro-acc | — | planned | planned |
+| BioViL-T (ImaGenome fine-tune) | — | **0.612** (seed 42 only) | planned | planned |
+| Google CXR Foundation (frozen linear) | 0.397 | planned | planned | planned |
+| Our foundation model | planned | planned | planned | planned |
+
+### BioViL-T ImaGenome — seed 42 (paper Table 2 protocol)
+
+| Finding | macro-acc | macro-F1 |
+|---|---|---|
+| consolidation | 0.646 | 0.596 |
+| edema | 0.605 | 0.600 |
+| pleural_effusion | 0.690 | 0.638 |
+| pneumonia | 0.613 | 0.586 |
+| pneumothorax | 0.508 | 0.458 |
+| **average** | **0.612** | — |
+
+Trained on ~78% of Chest ImaGenome silver-label pairs (51,077 train / 7,277 val from a partial MIMIC-CXR-JPG download), tested on full MS-CXR-T (1,035 pairs after filtering). Matches the paper's reported ~0.617 average. Remaining 3 seeds pending.
 
 ## Setup
 
@@ -54,10 +67,20 @@ python scripts/extract_google_cxr_features.py
 python scripts/train.py --config configs/google_cxr_protocol_a.yaml
 ```
 
-**BioViL-T paper replication (Table 2):**
+**ImaGenome-trained probes (Table 2 comparable):**
 ```bash
 # After MIMIC-CXR-JPG images finish downloading to /data/imagenome_images/
+
+# BioViL-T: full end-to-end fine-tune on ImaGenome, test on full MS-CXR-T
 python scripts/train_biovil_t_imagenome.py
+
+# Google CXR: frozen encoder — extract features, then train MLP probe
+# (run in a TF-capable env; train step is PyTorch-only)
+python scripts/extract_google_cxr_imagenome_features.py
+python scripts/train_google_cxr_imagenome.py
+
+# Our model: end-to-end fine-tune (once model is integrated)
+python scripts/train_finetune_imagenome_generic.py --model ours
 ```
 
 **Zero-shot (Protocol C):**
