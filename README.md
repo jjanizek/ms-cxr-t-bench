@@ -22,22 +22,28 @@ Detect acute findings relevant to ICU care (pneumothorax, consolidation, edema, 
 | Model | Temporal (Protocol A) | Temporal (ImaGenome FT, full MS-CXR-T test) | Device | Critical |
 |---|---|---|---|---|
 | BioViL-T (frozen MLP) | 0.401 macro-acc | — | planned | planned |
-| BioViL-T (ImaGenome fine-tune) | — | **0.612** (seed 42 only) | planned | planned |
-| Google CXR Foundation (frozen linear) | 0.397 | planned | planned | planned |
+| BioViL-T (ImaGenome fine-tune) | — | **0.612** (seed 42) | planned | planned |
+| Google CXR Foundation (frozen linear) | 0.397 | — | planned | planned |
+| Google CXR (frozen feats + MLP, ImaGenome) | — | **0.565** (seed 42) | planned | planned |
 | Our foundation model | planned | planned | planned | planned |
 
-### BioViL-T ImaGenome — seed 42 (paper Table 2 protocol)
+### ImaGenome-trained temporal classifier — seed 42 (paper Table 2 protocol)
 
-| Finding | macro-acc | macro-F1 |
+Per-finding macro-accuracy on full MS-CXR-T test set (1,035 pairs after filtering):
+
+| Finding | BioViL-T (full FT) | Google CXR (frozen+MLP) |
 |---|---|---|
-| consolidation | 0.646 | 0.596 |
-| edema | 0.605 | 0.600 |
-| pleural_effusion | 0.690 | 0.638 |
-| pneumonia | 0.613 | 0.586 |
-| pneumothorax | 0.508 | 0.458 |
-| **average** | **0.612** | — |
+| consolidation | 0.646 | 0.527 |
+| edema | 0.605 | 0.616 |
+| pleural_effusion | 0.690 | 0.650 |
+| pneumonia | 0.613 | 0.638 |
+| pneumothorax | 0.508 | 0.393 |
+| **average** | **0.612** | **0.565** |
 
-Trained on ~78% of Chest ImaGenome silver-label pairs (51,077 train / 7,277 val from a partial MIMIC-CXR-JPG download), tested on full MS-CXR-T (1,035 pairs after filtering). Matches the paper's reported ~0.617 average. Remaining 3 seeds pending.
+Notes:
+- **BioViL-T** matches the paper's reported ~0.617 average. ImaGenome silver labels (51k train / 7.3k val from a ~78% MIMIC-CXR-JPG download), tested on full MS-CXR-T.
+- **Google CXR** trails by ~0.05 — expected since the SavedModel signature has a fixed batch=1 and can't be fine-tuned end-to-end, so we can only train an MLP head on frozen features (2×1376-dim concat → 512 → 3).
+- Only seed 42 so far; remaining seeds (123, 456, 789) pending.
 
 ## Setup
 

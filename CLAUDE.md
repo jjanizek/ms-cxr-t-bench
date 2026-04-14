@@ -144,8 +144,9 @@ BioViL-T is a **temporal encoder** — it jointly encodes both images in a pair 
 - [x] MIMIC-CXR-JPG images downloaded via gsutil rsync → `/data/mimic-cxr-jpg/` (~78% complete, 296k files / 451 GB)
 - [x] BioViL-T trained on ImaGenome, tested on full MS-CXR-T (seed 42): **avg macro_acc 0.612** (consolidation 0.646, edema 0.605, pleural_effusion 0.690, pneumonia 0.613, pneumothorax 0.508). Matches paper Table 2 (~0.617).
 - [ ] BioViL-T ImaGenome — remaining seeds [123, 456, 789] for error bars
-- [ ] Google CXR — extract ImaGenome features → `extract_google_cxr_imagenome_features.py`
-- [ ] Google CXR — frozen MLP probe trained on ImaGenome → `train_google_cxr_imagenome.py`
+- [x] Google CXR — extract ImaGenome features (5 findings × {train,val}, 1376-dim, batch=1 signature so no GPU batching)
+- [x] Google CXR — frozen MLP probe on ImaGenome (seed 42): **avg macro_acc 0.565** (consolidation 0.527, edema 0.616, pleural_effusion 0.650, pneumonia 0.638, pneumothorax 0.393). Trails BioViL-T by ~0.05, expected since frozen encoder only.
+- [ ] Google CXR — remaining seeds [123, 456, 789]
 - [ ] Google CXR Foundation Protocol A results (MLP probe)
 - [ ] Our foundation model — Protocol A
 - [ ] Our foundation model — ImaGenome fine-tune → `train_finetune_imagenome_generic.py`

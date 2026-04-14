@@ -1,0 +1,125 @@
+{
+  "model": "google_cxr_imagenome",
+  "protocol": "frozen_probe_imagenome",
+  "description": "Frozen Google CXR features, MLP probe trained on ImaGenome silver labels, tested on full MS-CXR-T (comparable to BioViL-T Table 2 but frozen encoder)",
+  "git_hash": "16d9633",
+  "timestamp": "20260414_150354",
+  "seeds": [
+    42
+  ],
+  "args": {
+    "imagenome_features_dir": "data/features/google_cxr_imagenome",
+    "mscxrt_features_dir": "data/features/google_cxr",
+    "mscxrt_labels": "data/raw/ms_cxr_t_labels.csv",
+    "mscxrt_images": "data/raw/images",
+    "seeds": [
+      42,
+      123,
+      456,
+      789
+    ],
+    "seed": 42,
+    "finding": null,
+    "device": "cuda",
+    "epochs": 30,
+    "batch_size": 128,
+    "lr": 0.001,
+    "patience": 10,
+    "no_class_weight": false,
+    "ckpt_dir": "checkpoints/google_cxr_imagenome"
+  },
+  "results": [
+    {
+      "model": "google_cxr_imagenome",
+      "finding": "consolidation",
+      "seed": 42,
+      "macro_acc": 0.5270085470085469,
+      "macro_f1": 0.5275648810418333,
+      "best_val_macro_acc": 0.5595198240220187
+    },
+    {
+      "model": "google_cxr_imagenome",
+      "finding": "edema",
+      "seed": 42,
+      "macro_acc": 0.6160108708495805,
+      "macro_f1": 0.6183935484858223,
+      "best_val_macro_acc": 0.5842389523695437
+    },
+    {
+      "model": "google_cxr_imagenome",
+      "finding": "pleural_effusion",
+      "seed": 42,
+      "macro_acc": 0.6498782784438014,
+      "macro_f1": 0.6349633401928676,
+      "best_val_macro_acc": 0.5696312036780733
+    },
+    {
+      "model": "google_cxr_imagenome",
+      "finding": "pneumonia",
+      "seed": 42,
+      "macro_acc": 0.6381562881562882,
+      "macro_f1": 0.5479242979242979,
+      "best_val_macro_acc": 0.5560288483209376
+    },
+    {
+      "model": "google_cxr_imagenome",
+      "finding": "pneumothorax",
+      "seed": 42,
+      "macro_acc": 0.393001525553013,
+      "macro_f1": 0.37903077206559793,
+      "best_val_macro_acc": 0.38985177023762235
+    }
+  ],
+  "summary": {
+    "consolidation": {
+      "macro_acc": {
+        "mean": 0.5270085470085469,
+        "std": NaN
+      },
+      "macro_f1": {
+        "mean": 0.5275648810418333,
+        "std": NaN
+      }
+    },
+    "edema": {
+      "macro_acc": {
+        "mean": 0.6160108708495805,
+        "std": NaN
+      },
+      "macro_f1": {
+        "mean": 0.6183935484858223,
+        "std": NaN
+      }
+    },
+    "pleural_effusion": {
+      "macro_acc": {
+        "mean": 0.6498782784438014,
+        "std": NaN
+      },
+      "macro_f1": {
+        "mean": 0.6349633401928676,
+        "std": NaN
+      }
+    },
+    "pneumonia": {
+      "macro_acc": {
+        "mean": 0.6381562881562882,
+        "std": NaN
+      },
+      "macro_f1": {
+        "mean": 0.5479242979242979,
+        "std": NaN
+      }
+    },
+    "pneumothorax": {
+      "macro_acc": {
+        "mean": 0.393001525553013,
+        "std": NaN
+      },
+      "macro_f1": {
+        "mean": 0.37903077206559793,
+        "std": NaN
+      }
+    }
+  }
+}

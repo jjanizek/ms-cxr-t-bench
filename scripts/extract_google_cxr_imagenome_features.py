@@ -23,6 +23,7 @@ import argparse
 import io
 import logging
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -85,7 +86,14 @@ def image_to_tf_example(path: Path) -> bytes:
 
 
 def run_single(infer_fn, serialised: bytes) -> np.ndarray:
-    """Run inference on one serialised tf.Example → (D,) float32 vector."""
+    """Run inference on one serialised tf.Example → (D,) float32 vector.
+
+    The elixr-c-v2-pooled SavedModel signature has a hardcoded batch dim of 1
+    (TensorSpec(shape=(1,))), so true batching is not possible — passing a
+    larger tensor silently truncates to the first item. We process one image
+    per inference call and rely on the CPU-side ThreadPoolExecutor prefetch
+    to keep the GPU fed.
+    """
     import tensorflow as tf
 
     tensor = tf.constant([serialised], dtype=tf.string)
@@ -106,32 +114,40 @@ def run_single(infer_fn, serialised: bytes) -> np.ndarray:
 
 
 def extract_features_for_split(
-    df, dicom_lookup: dict, infer_fn, split_name: str, finding: str
+    df, dicom_lookup: dict, infer_fn, split_name: str, finding: str,
+    num_io_workers: int = 8,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Extract concatenated [prior, curr] features for all rows in df.
+
+    Uses a thread pool to overlap image load + tf.Example serialise (CPU-bound)
+    with GPU inference. Batching is impossible — the SavedModel has fixed batch=1.
 
     Returns:
         pair_feats: (N, 2*D) float32
         labels:     (N,) int64  {0=improving, 1=stable, 2=worsening}
     """
-    prior_feats, curr_feats = [], []
-    labels = []
+    # Flatten pairs into (prior, curr) interleaved path list.
+    paths = []
+    for _, row in df.iterrows():
+        paths.append(dicom_lookup[row["prior_dicom_id"]])
+        paths.append(dicom_lookup[row["curr_dicom_id"]])
 
-    for _, row in tqdm(df.iterrows(), total=len(df), desc=f"{finding}/{split_name}"):
-        curr_path = dicom_lookup[row["curr_dicom_id"]]
-        prior_path = dicom_lookup[row["prior_dicom_id"]]
+    n_imgs = len(paths)
+    embeddings: list[np.ndarray | None] = [None] * n_imgs
 
-        s_curr = image_to_tf_example(curr_path)
-        s_prior = image_to_tf_example(prior_path)
+    with ThreadPoolExecutor(max_workers=num_io_workers) as pool:
+        serialised_iter = pool.map(image_to_tf_example, paths, chunksize=4)
+        for idx, serialised in enumerate(
+            tqdm(serialised_iter, total=n_imgs, desc=f"{finding}/{split_name}")
+        ):
+            embeddings[idx] = run_single(infer_fn, serialised)
 
-        curr_feats.append(run_single(infer_fn, s_curr))
-        prior_feats.append(run_single(infer_fn, s_prior))
-        labels.append(int(row["label"]))
-
-    pair_feats = np.concatenate(
-        [np.stack(prior_feats), np.stack(curr_feats)], axis=1
-    )  # (N, 2*D)
-    return pair_feats, np.array(labels, dtype=np.int64)
+    arr = np.stack(embeddings, axis=0)              # (n_imgs, D)
+    prior_feats = arr[0::2]
+    curr_feats = arr[1::2]
+    pair_feats = np.concatenate([prior_feats, curr_feats], axis=1)
+    labels = df["label"].values.astype(np.int64)
+    return pair_feats, labels
 
 
 def main():
@@ -143,6 +159,8 @@ def main():
     parser.add_argument("--out_dir", default="data/features/google_cxr_imagenome")
     parser.add_argument("--hf_cache_dir", default=None)
     parser.add_argument("--finding", default=None, help="Extract only this finding (default: all)")
+    parser.add_argument("--num_io_workers", type=int, default=8,
+                        help="Threads for image load + tf.Example serialise (CPU side).")
     args = parser.parse_args()
 
     import pandas as pd
@@ -186,13 +204,19 @@ def main():
         logger.info("%s: %d train, %d val pairs", finding, len(df_tr), len(df_va))
 
         if not train_feats_path.exists():
-            tr_feats, tr_labels = extract_features_for_split(df_tr, dicom_lookup, infer_fn, "train", finding)
+            tr_feats, tr_labels = extract_features_for_split(
+                df_tr, dicom_lookup, infer_fn, "train", finding,
+                num_io_workers=args.num_io_workers,
+            )
             np.save(train_feats_path, tr_feats)
             np.save(train_labels_path, tr_labels)
             logger.info("Saved train: %s %s", train_feats_path, tr_feats.shape)
 
         if not val_feats_path.exists() and len(df_va) > 0:
-            va_feats, va_labels = extract_features_for_split(df_va, dicom_lookup, infer_fn, "val", finding)
+            va_feats, va_labels = extract_features_for_split(
+                df_va, dicom_lookup, infer_fn, "val", finding,
+                num_io_workers=args.num_io_workers,
+            )
             np.save(val_feats_path, va_feats)
             np.save(val_labels_path, va_labels)
             logger.info("Saved val: %s %s", val_feats_path, va_feats.shape)
