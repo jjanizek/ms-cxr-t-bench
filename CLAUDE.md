@@ -148,6 +148,8 @@ BioViL-T is a **temporal encoder** — it jointly encodes both images in a pair 
 - [x] Google CXR — frozen MLP probe on ImaGenome (seed 42): **avg macro_acc 0.565** (consolidation 0.527, edema 0.616, pleural_effusion 0.650, pneumonia 0.638, pneumothorax 0.393). Trails BioViL-T by ~0.05, expected since frozen encoder only.
 - [ ] Google CXR — remaining seeds [123, 456, 789]
 - [ ] Google CXR Foundation Protocol A results (MLP probe)
+- [x] ImageNet DenseNet-121 full fine-tune on ImaGenome (seed 42): **avg macro_acc 0.589** (consolidation 0.550, edema 0.645, pleural_effusion 0.662, pneumonia 0.581, pneumothorax 0.507). Generic ImageNet CNN beats Google CXR frozen probe by 0.024 — full FT matters more than CXR pretraining.
+- [ ] ImageNet DenseNet-121 — remaining seeds [123, 456, 789]
 - [ ] Our foundation model — Protocol A
 - [ ] Our foundation model — ImaGenome fine-tune → `train_finetune_imagenome_generic.py`
 

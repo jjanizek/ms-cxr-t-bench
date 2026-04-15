@@ -105,6 +105,12 @@ class ConcatPairClassifier(nn.Module):
 
     encode_image(prior) and encode_image(curr) are called separately,
     their embeddings concatenated, then passed through a 2-layer MLP.
+
+    Head init uses PyTorch's default Kaiming-uniform for Linear layers — a
+    near-zero std=0.01 init on the final layer combined with balanced classes
+    and weighted CE produced a symmetry-locked saddle point (predictions
+    uniform, gradient ≈0, loss pinned at log K). Kaiming default breaks the
+    symmetry by giving varied initial logits across classes.
     """
 
     def __init__(self, encoder: nn.Module, embed_dim: int, num_classes: int = 3, hidden: int = 256):
@@ -115,10 +121,17 @@ class ConcatPairClassifier(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden, num_classes),
         )
-        for m in self.head.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, std=0.01)
-                nn.init.zeros_(m.bias)
+
+    def set_final_bias_to_log_priors(self, label_counts: np.ndarray) -> None:
+        """Initialise final-layer bias to log class priors so the model starts
+        at the training class distribution (the correct starting point before
+        seeing features). Helps gradient signal when classes are balanced.
+        """
+        priors = label_counts / label_counts.sum()
+        log_priors = np.log(np.clip(priors, 1e-6, None)).astype(np.float32)
+        final = self.head[-1]
+        with torch.no_grad():
+            final.bias.copy_(torch.from_numpy(log_priors - log_priors.mean()))
 
     def forward(self, img_prior: torch.Tensor, img_curr: torch.Tensor) -> torch.Tensor:
         f_prior = self.encoder(img_prior)   # (B, D)
@@ -136,20 +149,33 @@ class ConcatPairClassifier(nn.Module):
 def load_encoder(model_name: str, device: str):
     """Load a PyTorch encoder by name. Returns (encoder_module, embed_dim).
 
-    Add new models here as they become available.
+    The returned module must accept a (B, 3, H, W) ImageNet-normalized tensor
+    and return a (B, embed_dim) global-pooled embedding.
     """
+    if model_name == "imagenet_densenet121":
+        from torchvision.models import densenet121, DenseNet121_Weights
+        m = densenet121(weights=DenseNet121_Weights.IMAGENET1K_V1)
+        m.classifier = nn.Identity()  # forward now returns (B, 1024)
+        return m, 1024
+
+    if model_name == "imagenet_resnet50":
+        from torchvision.models import resnet50, ResNet50_Weights
+        m = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2)
+        m.fc = nn.Identity()  # forward now returns (B, 2048)
+        return m, 2048
+
     if model_name == "ours":
-        # TODO: replace with actual model import once available
         raise NotImplementedError(
             "Our foundation model is not yet integrated. "
             "Add it to models/ours.py and update this function."
         )
-    else:
-        raise ValueError(
-            f"Unknown model '{model_name}'. "
-            f"For BioViL-T use train_biovil_t_imagenome.py. "
-            f"For Google CXR use extract_google_cxr_imagenome_features.py + train.py."
-        )
+
+    raise ValueError(
+        f"Unknown model '{model_name}'. "
+        f"Supported: imagenet_densenet121, imagenet_resnet50, ours. "
+        f"For BioViL-T use train_biovil_t_imagenome.py. "
+        f"For Google CXR use extract_google_cxr_imagenome_features.py + train_google_cxr_imagenome.py."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +202,8 @@ def evaluate(model, loader, device):
 def train_one_finding(
     df_train, df_val, df_test,
     finding, seed, model_name, imagenome_lookup, mscxrt_images_root,
-    device, epochs=30, warmup_epochs=1, batch_size=128,
+    device, epochs=30, warmup_epochs=1, batch_size=32,
+    grad_accum_steps=4, use_amp=True,
     backbone_lr=1e-5, head_lr=1e-3, weight_decay=1e-4,
     patience=10, num_workers=8, class_weight=True, ckpt_dir=None,
 ):
@@ -184,9 +211,14 @@ def train_one_finding(
     np.random.seed(seed)
 
     from torchvision import transforms
-    from health_multimodal.image.data.transforms import create_chest_xray_transform_for_inference
 
+    # ImageNet-pretrained models expect 3-channel RGB + ImageNet-normalised input.
+    # health_multimodal.load_image returns PIL 'L' (grayscale); .convert('RGB')
+    # replicates the single channel 3× which is the standard CXR-on-ImageNet
+    # fine-tuning convention (CheXNet, TorchXRayVision, etc.).
+    to_rgb = transforms.Lambda(lambda img: img.convert("RGB"))
     train_transform = transforms.Compose([
+        to_rgb,
         transforms.Resize(512),
         transforms.RandomCrop(448),
         transforms.RandomHorizontalFlip(),
@@ -196,7 +228,13 @@ def train_one_finding(
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0)),
     ])
-    val_transform = create_chest_xray_transform_for_inference(resize=512, center_crop_size=448)
+    val_transform = transforms.Compose([
+        to_rgb,
+        transforms.Resize(512),
+        transforms.CenterCrop(448),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
 
     train_ds = ImaGenomePairDataset(df_train, imagenome_lookup, train_transform)
     val_ds = ImaGenomePairDataset(df_val, imagenome_lookup, val_transform)
@@ -210,7 +248,15 @@ def train_one_finding(
     criterion = nn.CrossEntropyLoss(weight=criterion_weight)
 
     encoder, embed_dim = load_encoder(model_name, device)
-    model = ConcatPairClassifier(encoder, embed_dim).to(device)
+    model = ConcatPairClassifier(encoder, embed_dim)
+    label_counts = np.bincount(df_train["label"].values, minlength=3)
+    model.set_final_bias_to_log_priors(label_counts)
+    model = model.to(device)
+    # bf16 avoids fp16 overflow issues common with DenseNet-style concat
+    # architectures and doesn't need GradScaler (fp32-range exponent).
+    amp_dtype = torch.bfloat16 if use_amp else torch.float32
+    use_scaler = False  # bf16 / fp32 don't need loss scaling
+    scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
 
     # Warmup: head only
     for p in model.backbone_parameters():
@@ -219,18 +265,27 @@ def train_one_finding(
     for _ in range(warmup_epochs):
         model.train()
         for img_prior, img_curr, labels in train_loader:
-            loss = criterion(model(img_prior.to(device), img_curr.to(device)), labels.to(device))
-            opt_warmup.zero_grad(); loss.backward(); opt_warmup.step()
+            with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                loss = criterion(model(img_prior.to(device), img_curr.to(device)), labels.to(device))
+            opt_warmup.zero_grad()
+            if use_scaler:
+                scaler.scale(loss).backward()
+                scaler.step(opt_warmup)
+                scaler.update()
+            else:
+                loss.backward()
+                opt_warmup.step()
 
-    # Full fine-tuning with linear LR schedule
+    # Full fine-tuning with linear LR schedule + gradient accumulation
     for p in model.backbone_parameters():
         p.requires_grad_(True)
     opt = AdamW([
         {"params": model.backbone_parameters(), "lr": backbone_lr, "weight_decay": weight_decay},
         {"params": model.head_parameters(), "lr": head_lr, "weight_decay": weight_decay},
     ])
-    total_steps = epochs * len(train_loader)
-    warmup_steps = warmup_epochs * len(train_loader)
+    steps_per_epoch = max(1, len(train_loader) // grad_accum_steps)
+    total_steps = epochs * steps_per_epoch
+    warmup_steps = warmup_epochs * steps_per_epoch
 
     def lr_lambda(step):
         if step < warmup_steps:
@@ -244,10 +299,26 @@ def train_one_finding(
     for ep in range(epochs):
         model.train()
         total_loss = 0.0
-        for img_prior, img_curr, labels in tqdm(train_loader, desc=f"ep{ep+1}", leave=False):
-            loss = criterion(model(img_prior.to(device), img_curr.to(device)), labels.to(device))
-            opt.zero_grad(); loss.backward(); opt.step(); scheduler.step()
-            total_loss += loss.item()
+        opt.zero_grad()
+        for step, (img_prior, img_curr, labels) in enumerate(
+            tqdm(train_loader, desc=f"ep{ep+1}", leave=False)
+        ):
+            with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                logits = model(img_prior.to(device), img_curr.to(device))
+                loss = criterion(logits, labels.to(device)) / grad_accum_steps
+            if use_scaler:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
+            total_loss += loss.item() * grad_accum_steps
+            if (step + 1) % grad_accum_steps == 0:
+                if use_scaler:
+                    scaler.step(opt)
+                    scaler.update()
+                else:
+                    opt.step()
+                scheduler.step()
+                opt.zero_grad()
 
         val_acc, val_f1 = evaluate(model, val_loader, device)
         if val_acc > best_val_acc:
@@ -266,8 +337,15 @@ def train_one_finding(
 
     model.load_state_dict(best_state)
     test_acc, test_f1 = evaluate(model, test_loader, device)
-    logger.info("[%s %s seed=%d] Test — macro_acc=%.3f  macro_f1=%.3f", model_name, finding, seed, test_acc, test_f1)
-    return {"model": model_name, "finding": finding, "seed": seed, "macro_acc": test_acc, "macro_f1": test_f1}
+    logger.info(
+        "[%s %s seed=%d] MS-CXR-T test — macro_acc=%.3f  macro_f1=%.3f  (best_val=%.3f)",
+        model_name, finding, seed, test_acc, test_f1, best_val_acc,
+    )
+    return {
+        "model": model_name, "finding": finding, "seed": seed,
+        "macro_acc": test_acc, "macro_f1": test_f1,
+        "best_val_macro_acc": best_val_acc,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -281,16 +359,23 @@ def main():
     parser.add_argument("--val_pairs", default="data/imagenome_pairs/pairs_val.csv")
     parser.add_argument("--dicom_to_path_csv", default="data/imagenome_pairs/dicom_to_path.csv")
     parser.add_argument("--mscxrt_labels", default="data/raw/ms_cxr_t_labels.csv")
-    parser.add_argument("--imagenome_images", default="/data/imagenome_images")
+    parser.add_argument("--imagenome_images", default="/data/mimic-cxr-jpg")
     parser.add_argument("--mscxrt_images", default="data/raw/images")
     parser.add_argument("--seeds", nargs="+", type=int, default=[42, 123, 456, 789])
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--finding", default=None)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--epochs", type=int, default=30)
-    parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--warmup_epochs", type=int, default=1)
+    parser.add_argument("--batch_size", type=int, default=32,
+                        help="Per-step batch size. Effective batch = batch_size * grad_accum_steps.")
+    parser.add_argument("--grad_accum_steps", type=int, default=4,
+                        help="Paper effective batch 128 = 32 × 4.")
+    parser.add_argument("--no_amp", action="store_true")
     parser.add_argument("--backbone_lr", type=float, default=1e-5)
+    parser.add_argument("--head_lr", type=float, default=1e-3)
     parser.add_argument("--patience", type=int, default=10)
+    parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--ckpt_dir", default="checkpoints/imagenome_generic")
     args = parser.parse_args()
 
@@ -319,9 +404,26 @@ def main():
         df_va = df_va[df_va["curr_dicom_id"].isin(imagenome_lookup) & df_va["prior_dicom_id"].isin(imagenome_lookup)]
         if len(df_tr) == 0 or len(df_te) == 0:
             continue
+        logger.info(
+            "Finding: %s — train=%d, val=%d, test(MS-CXR-T)=%d",
+            finding, len(df_tr), len(df_va), len(df_te),
+        )
 
         for seed in seeds:
-            result = train_one_finding(df_tr, df_va, df_te, finding=finding, seed=seed, model_name=args.model, imagenome_lookup=imagenome_lookup, mscxrt_images_root=args.mscxrt_images, device=args.device, epochs=args.epochs, batch_size=args.batch_size, backbone_lr=args.backbone_lr, patience=args.patience, ckpt_dir=args.ckpt_dir)
+            result = train_one_finding(
+                df_tr, df_va, df_te,
+                finding=finding, seed=seed, model_name=args.model,
+                imagenome_lookup=imagenome_lookup,
+                mscxrt_images_root=args.mscxrt_images,
+                device=args.device,
+                epochs=args.epochs, warmup_epochs=args.warmup_epochs,
+                batch_size=args.batch_size,
+                grad_accum_steps=args.grad_accum_steps,
+                use_amp=not args.no_amp,
+                backbone_lr=args.backbone_lr, head_lr=args.head_lr,
+                patience=args.patience, num_workers=args.num_workers,
+                ckpt_dir=args.ckpt_dir,
+            )
             if result:
                 all_results.append(result)
 

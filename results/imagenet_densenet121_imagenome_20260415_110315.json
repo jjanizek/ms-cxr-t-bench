@@ -1,0 +1,47 @@
+{
+  "model": "imagenet_densenet121",
+  "protocol": "imagenome_finetune",
+  "timestamp": "20260415_110315",
+  "results": [
+    {
+      "model": "imagenet_densenet121",
+      "finding": "consolidation",
+      "seed": 42,
+      "macro_acc": 0.5502564102564103,
+      "macro_f1": 0.5335571705838186,
+      "best_val_macro_acc": 0.5376209181406701
+    },
+    {
+      "model": "imagenet_densenet121",
+      "finding": "edema",
+      "seed": 42,
+      "macro_acc": 0.645173106463429,
+      "macro_f1": 0.6461132124690231,
+      "best_val_macro_acc": 0.5828598199074818
+    },
+    {
+      "model": "imagenet_densenet121",
+      "finding": "pleural_effusion",
+      "seed": 42,
+      "macro_acc": 0.6617259526106157,
+      "macro_f1": 0.615087931345723,
+      "best_val_macro_acc": 0.571503873574489
+    },
+    {
+      "model": "imagenet_densenet121",
+      "finding": "pneumonia",
+      "seed": 42,
+      "macro_acc": 0.5810744810744811,
+      "macro_f1": 0.5449682154345367,
+      "best_val_macro_acc": 0.5041902186161821
+    },
+    {
+      "model": "imagenet_densenet121",
+      "finding": "pneumothorax",
+      "seed": 42,
+      "macro_acc": 0.5073798627002288,
+      "macro_f1": 0.4370864785966712,
+      "best_val_macro_acc": 0.4325067394199227
+    }
+  ]
+}

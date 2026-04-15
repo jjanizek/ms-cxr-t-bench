@@ -19,31 +19,37 @@ Detect acute findings relevant to ICU care (pneumothorax, consolidation, edema, 
 
 ## Models
 
-| Model | Temporal (Protocol A) | Temporal (ImaGenome FT, full MS-CXR-T test) | Device | Critical |
+| Model | Pretraining | Trainable | Temporal (Protocol A) | Temporal (ImaGenome FT, full MS-CXR-T) |
 |---|---|---|---|---|
-| BioViL-T (frozen MLP) | 0.401 macro-acc | — | planned | planned |
-| BioViL-T (ImaGenome fine-tune) | — | **0.612** (seed 42) | planned | planned |
-| Google CXR Foundation (frozen linear) | 0.397 | — | planned | planned |
-| Google CXR (frozen feats + MLP, ImaGenome) | — | **0.565** (seed 42) | planned | planned |
-| Our foundation model | planned | planned | planned | planned |
+| BioViL-T | CXR (MIMIC contrastive) | full encoder + head | 0.401 (frozen MLP) | **0.612** (seed 42) |
+| Google CXR Foundation | CXR (elixr-c-v2) | MLP head only | 0.397 (frozen linear) | 0.565 (seed 42) |
+| DenseNet-121 | ImageNet | full encoder + head | — | 0.589 (seed 42) |
+| Our foundation model | TBD | TBD | planned | planned |
 
 ### ImaGenome-trained temporal classifier — seed 42 (paper Table 2 protocol)
 
 Per-finding macro-accuracy on full MS-CXR-T test set (1,035 pairs after filtering):
 
-| Finding | BioViL-T (full FT) | Google CXR (frozen+MLP) |
-|---|---|---|
-| consolidation | 0.646 | 0.527 |
-| edema | 0.605 | 0.616 |
-| pleural_effusion | 0.690 | 0.650 |
-| pneumonia | 0.613 | 0.638 |
-| pneumothorax | 0.508 | 0.393 |
-| **average** | **0.612** | **0.565** |
+| Finding | BioViL-T (CXR + full FT) | Google CXR (CXR + MLP) | DenseNet-121 (ImageNet + full FT) |
+|---|---|---|---|
+| consolidation | **0.646** | 0.527 | 0.550 |
+| edema | 0.605 | 0.616 | **0.645** |
+| pleural_effusion | **0.690** | 0.650 | 0.662 |
+| pneumonia | 0.613 | **0.638** | 0.581 |
+| pneumothorax | **0.508** | 0.393 | 0.507 |
+| **average** | **0.612** | 0.565 | 0.589 |
 
-Notes:
-- **BioViL-T** matches the paper's reported ~0.617 average. ImaGenome silver labels (51k train / 7.3k val from a ~78% MIMIC-CXR-JPG download), tested on full MS-CXR-T.
-- **Google CXR** trails by ~0.05 — expected since the SavedModel signature has a fixed batch=1 and can't be fine-tuned end-to-end, so we can only train an MLP head on frozen features (2×1376-dim concat → 512 → 3).
-- Only seed 42 so far; remaining seeds (123, 456, 789) pending.
+Observations (seed 42 only — take with error bars in mind):
+- **CXR-specific pretraining helps, but only modestly**: BioViL-T beats a generic ImageNet DenseNet-121 (both fine-tuned end-to-end) by just 0.023 average. The bulk of the benefit comes from full fine-tuning, not the CXR-specific representation.
+- **Full fine-tuning > frozen probe, even across pretraining domains**: DenseNet-121 (ImageNet + FT) beats Google CXR (CXR + frozen-feature MLP) by 0.024. Google CXR can't be fine-tuned end-to-end (its SavedModel signature has a fixed batch=1).
+- **DenseNet-121 wins on edema** (0.645 vs 0.605 for BioViL-T) and is competitive on pleural_effusion and pneumothorax.
+- **Pneumothorax is hard for every model** (< 0.51) — likely limited by the smallest ImaGenome training set and the most missing-image attrition.
+- Remaining seeds (123, 456, 789) pending for error bars.
+
+### Gotchas found during this run
+
+- `train_finetune_imagenome_generic.py` required a **class-log-prior bias init** on the final head linear. With `nn.init.normal_(weight, std=0.01)` and zero bias, balanced-class findings (edema) were symmetry-locked at uniform predictions — loss pinned exactly at log(3)=1.0986, no gradient escape. Only the skewed-class findings (consolidation, weight 2.2 on rare class) broke the symmetry naturally.
+- DenseNet-121 + fp16 AMP overflows mid-training — switched to bf16.
 
 ## Setup
 
