@@ -1,0 +1,77 @@
+{
+  "model": "imagenet_densenet121",
+  "head_type": "attention",
+  "protocol": "imagenome_finetune",
+  "timestamp": "20260416_025450",
+  "args": {
+    "model": "imagenet_densenet121",
+    "train_pairs": "data/imagenome_pairs/pairs_train.csv",
+    "val_pairs": "data/imagenome_pairs/pairs_val.csv",
+    "dicom_to_path_csv": "data/imagenome_pairs/dicom_to_path.csv",
+    "mscxrt_labels": "data/raw/ms_cxr_t_labels.csv",
+    "imagenome_images": "/data/mimic-cxr-jpg",
+    "mscxrt_images": "data/raw/images",
+    "seeds": [
+      42,
+      123,
+      456,
+      789
+    ],
+    "seed": 42,
+    "finding": null,
+    "device": "cuda",
+    "epochs": 30,
+    "warmup_epochs": 1,
+    "batch_size": 32,
+    "grad_accum_steps": 4,
+    "no_amp": false,
+    "head_type": "attention",
+    "backbone_lr": 1e-05,
+    "head_lr": 0.001,
+    "patience": 10,
+    "num_workers": 8,
+    "ckpt_dir": "checkpoints/imagenome_generic"
+  },
+  "results": [
+    {
+      "model": "imagenet_densenet121",
+      "finding": "consolidation",
+      "seed": 42,
+      "macro_acc": 0.49401709401709404,
+      "macro_f1": 0.4232565899232566,
+      "best_val_macro_acc": 0.532939857931149
+    },
+    {
+      "model": "imagenet_densenet121",
+      "finding": "edema",
+      "seed": 42,
+      "macro_acc": 0.6427389814486588,
+      "macro_f1": 0.6461793407436203,
+      "best_val_macro_acc": 0.5847043773762036
+    },
+    {
+      "model": "imagenet_densenet121",
+      "finding": "pleural_effusion",
+      "seed": 42,
+      "macro_acc": 0.6281593469687724,
+      "macro_f1": 0.6114888568105542,
+      "best_val_macro_acc": 0.5650891937884716
+    },
+    {
+      "model": "imagenet_densenet121",
+      "finding": "pneumonia",
+      "seed": 42,
+      "macro_acc": 0.6206959706959707,
+      "macro_f1": 0.5534869976359338,
+      "best_val_macro_acc": 0.49929051160694166
+    },
+    {
+      "model": "imagenet_densenet121",
+      "finding": "pneumothorax",
+      "seed": 42,
+      "macro_acc": 0.3403985507246377,
+      "macro_f1": 0.3122962962962963,
+      "best_val_macro_acc": 0.3941322700165144
+    }
+  ]
+}

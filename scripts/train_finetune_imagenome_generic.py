@@ -146,6 +146,58 @@ class ConcatPairClassifier(nn.Module):
         return self.head.parameters()
 
 
+class CrossAttnPairClassifier(nn.Module):
+    """Siamese encoder with a minimal attention head over POOLED pair features.
+
+    Each image is encoded to a single D-dim vector (the normal pooled output).
+    Those two vectors become a 2-token sequence with a learnable type/position
+    embedding to distinguish prior vs current. A learnable CLS query attends
+    over that sequence via a single MultiheadAttention, then a linear layer
+    produces logits.
+
+    This is "attention as a smart learned pooling over prior+current" — far
+    simpler than a full transformer-decoder stack over spatial tokens (which
+    class-collapsed on the small per-finding datasets).
+    """
+
+    def __init__(
+        self, encoder: nn.Module, embed_dim: int,
+        num_classes: int = 3, num_heads: int = 8,
+    ):
+        super().__init__()
+        self.encoder = encoder   # forward(img) → (B, embed_dim)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        nn.init.normal_(self.cls_token, std=0.02)
+        # 2 type embeddings: one for prior, one for current.
+        self.type_embed = nn.Parameter(torch.zeros(1, 2, embed_dim))
+        nn.init.normal_(self.type_embed, std=0.02)
+        self.attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
+        self.norm = nn.LayerNorm(embed_dim)
+        self.head = nn.Linear(embed_dim, num_classes)
+
+    def forward(self, img_prior: torch.Tensor, img_curr: torch.Tensor) -> torch.Tensor:
+        f_prior = self.encoder(img_prior)                # (B, D)
+        f_curr = self.encoder(img_curr)                  # (B, D)
+        kv = torch.stack([f_prior, f_curr], dim=1) + self.type_embed  # (B, 2, D)
+        B = kv.shape[0]
+        q = self.cls_token.expand(B, -1, -1)             # (B, 1, D)
+        attn_out, _ = self.attn(query=q, key=kv, value=kv)  # (B, 1, D)
+        return self.head(self.norm(attn_out[:, 0]))
+
+    def set_final_bias_to_log_priors(self, label_counts: np.ndarray) -> None:
+        priors = label_counts / label_counts.sum()
+        log_priors = np.log(np.clip(priors, 1e-6, None)).astype(np.float32)
+        with torch.no_grad():
+            self.head.bias.copy_(torch.from_numpy(log_priors - log_priors.mean()))
+
+    def backbone_parameters(self):
+        return self.encoder.parameters()
+
+    def head_parameters(self):
+        encoder_ids = {id(p) for p in self.encoder.parameters()}
+        return (p for p in self.parameters() if id(p) not in encoder_ids)
+
+
 def load_encoder(model_name: str, device: str):
     """Load a PyTorch encoder by name. Returns (encoder_module, embed_dim).
 
@@ -203,7 +255,7 @@ def train_one_finding(
     df_train, df_val, df_test,
     finding, seed, model_name, imagenome_lookup, mscxrt_images_root,
     device, epochs=30, warmup_epochs=1, batch_size=32,
-    grad_accum_steps=4, use_amp=True,
+    grad_accum_steps=4, use_amp=True, head_type="concat",
     backbone_lr=1e-5, head_lr=1e-3, weight_decay=1e-4,
     patience=10, num_workers=8, class_weight=True, ckpt_dir=None,
 ):
@@ -248,7 +300,12 @@ def train_one_finding(
     criterion = nn.CrossEntropyLoss(weight=criterion_weight)
 
     encoder, embed_dim = load_encoder(model_name, device)
-    model = ConcatPairClassifier(encoder, embed_dim)
+    if head_type == "concat":
+        model = ConcatPairClassifier(encoder, embed_dim)
+    elif head_type == "attention":
+        model = CrossAttnPairClassifier(encoder, embed_dim)
+    else:
+        raise ValueError(f"Unknown head_type: {head_type}")
     label_counts = np.bincount(df_train["label"].values, minlength=3)
     model.set_final_bias_to_log_priors(label_counts)
     model = model.to(device)
@@ -372,6 +429,9 @@ def main():
     parser.add_argument("--grad_accum_steps", type=int, default=4,
                         help="Paper effective batch 128 = 32 × 4.")
     parser.add_argument("--no_amp", action="store_true")
+    parser.add_argument("--head_type", choices=["concat", "attention"], default="concat",
+                        help="concat: global-pooled feats → MLP (default). "
+                             "attention: cross-attention over spatial tokens (DenseNet only).")
     parser.add_argument("--backbone_lr", type=float, default=1e-5)
     parser.add_argument("--head_lr", type=float, default=1e-3)
     parser.add_argument("--patience", type=int, default=10)
@@ -420,6 +480,7 @@ def main():
                 batch_size=args.batch_size,
                 grad_accum_steps=args.grad_accum_steps,
                 use_amp=not args.no_amp,
+                head_type=args.head_type,
                 backbone_lr=args.backbone_lr, head_lr=args.head_lr,
                 patience=args.patience, num_workers=args.num_workers,
                 ckpt_dir=args.ckpt_dir,
@@ -441,9 +502,15 @@ def main():
 
     Path("results").mkdir(exist_ok=True)
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    out = Path("results") / f"{args.model}_imagenome_{timestamp}.json"
+    tag = args.head_type if args.head_type != "concat" else ""
+    suffix = f"_{tag}" if tag else ""
+    out = Path("results") / f"{args.model}{suffix}_imagenome_{timestamp}.json"
     with open(out, "w") as f:
-        json.dump({"model": args.model, "protocol": "imagenome_finetune", "timestamp": timestamp, "results": all_results}, f, indent=2)
+        json.dump({
+            "model": args.model, "head_type": args.head_type,
+            "protocol": "imagenome_finetune", "timestamp": timestamp,
+            "args": vars(args), "results": all_results,
+        }, f, indent=2)
     logger.info("Results saved to %s", out)
 
 
