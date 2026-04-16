@@ -1,0 +1,125 @@
+{
+  "model": "maira2",
+  "judge_api": "openai",
+  "judge_model": "gpt-4.1-mini",
+  "prompt_mode": "specific",
+  "timestamp": "20260416_222741",
+  "per_finding": [
+    {
+      "finding": "consolidation",
+      "n": 168,
+      "macro_acc": 0.46393162393162396,
+      "macro_f1": 0.48032648032648034,
+      "confusion_matrix": [
+        [
+          8,
+          9,
+          8
+        ],
+        [
+          1,
+          56,
+          21
+        ],
+        [
+          3,
+          39,
+          23
+        ]
+      ]
+    },
+    {
+      "finding": "edema",
+      "n": 223,
+      "macro_acc": 0.332198983811887,
+      "macro_f1": 0.2167384170997285,
+      "confusion_matrix": [
+        [
+          3,
+          65,
+          2
+        ],
+        [
+          2,
+          53,
+          7
+        ],
+        [
+          1,
+          81,
+          9
+        ]
+      ]
+    },
+    {
+      "finding": "pleural_effusion",
+      "n": 328,
+      "macro_acc": 0.31749115796242705,
+      "macro_f1": 0.2853294377292398,
+      "confusion_matrix": [
+        [
+          3,
+          50,
+          6
+        ],
+        [
+          16,
+          126,
+          22
+        ],
+        [
+          8,
+          83,
+          14
+        ]
+      ]
+    },
+    {
+      "finding": "pneumonia",
+      "n": 171,
+      "macro_acc": 0.33736263736263733,
+      "macro_f1": 0.2612272467482984,
+      "confusion_matrix": [
+        [
+          1,
+          12,
+          1
+        ],
+        [
+          4,
+          40,
+          8
+        ],
+        [
+          10,
+          77,
+          18
+        ]
+      ]
+    },
+    {
+      "finding": "pneumothorax",
+      "n": 145,
+      "macro_acc": 0.37310259344012203,
+      "macro_f1": 0.35924611136835244,
+      "confusion_matrix": [
+        [
+          3,
+          13,
+          3
+        ],
+        [
+          8,
+          63,
+          9
+        ],
+        [
+          8,
+          30,
+          8
+        ]
+      ]
+    }
+  ],
+  "average_macro_acc": 0.36481739930173945
+}
