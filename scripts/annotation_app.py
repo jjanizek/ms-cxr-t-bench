@@ -142,6 +142,12 @@ def main():
         unlabeled = df.index[~done_mask].tolist()
         st.session_state.idx = unlabeled[0] if unlabeled else 0
 
+    # Keep the sidebar picker's widget state in sync with idx.
+    # Without this, clicking Next/Prev/Agree/etc. updates idx but the
+    # selectbox keeps its old stored value and overrides idx on rerun.
+    if st.session_state.get("_picker") != st.session_state.idx:
+        st.session_state["_picker"] = st.session_state.idx
+
     # Sample picker
     st.sidebar.markdown("### Jump to sample")
     picker_options = [
@@ -151,7 +157,6 @@ def main():
     picked = st.sidebar.selectbox(
         "Sample", range(n),
         format_func=lambda i: picker_options[i],
-        index=st.session_state.idx,
         key="_picker",
     )
     if picked != st.session_state.idx:
