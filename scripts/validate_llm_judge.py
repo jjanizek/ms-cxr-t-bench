@@ -62,9 +62,10 @@ def cmd_export(args):
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create annotation sheet
-    sheet = sampled[["dicom_id", "previous_dicom_id", "finding",
-                     "maira2_report", "predicted"]].copy()
+    # Create annotation sheet (preserve ground_truth for reference during labeling)
+    cols = ["dicom_id", "previous_dicom_id", "finding", "ground_truth",
+            "maira2_report", "predicted"]
+    sheet = sampled[[c for c in cols if c in sampled.columns]].copy()
     sheet["human_label"] = ""  # blank column for annotator
     sheet["notes"] = ""
 

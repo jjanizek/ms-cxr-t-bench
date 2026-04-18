@@ -169,7 +169,7 @@ def main():
             st.rerun()
     with col_counter:
         finding = row["finding"]
-        gt = row["ground_truth"]
+        gt = row["ground_truth"] if "ground_truth" in row.index else "—"
         pred = row["predicted"]
         st.markdown(
             f"### Sample {idx+1}/{n}  —  **{finding}**  \n"
