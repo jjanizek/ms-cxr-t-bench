@@ -1,0 +1,94 @@
+[
+  {
+    "label": "maira2_judge",
+    "overall": {
+      "n": 1035,
+      "exact": 0.42995169082125606,
+      "adjacent": 0.5478260869565217,
+      "contradiction": 0.022222222222222223
+    },
+    "per_finding": {
+      "consolidation": {
+        "n": 168,
+        "exact": 0.4880952380952381,
+        "adjacent": 0.49404761904761907,
+        "contradiction": 0.017857142857142856
+      },
+      "edema": {
+        "n": 223,
+        "exact": 0.3004484304932735,
+        "adjacent": 0.6860986547085202,
+        "contradiction": 0.013452914798206279
+      },
+      "pleural_effusion": {
+        "n": 328,
+        "exact": 0.5,
+        "adjacent": 0.49085365853658536,
+        "contradiction": 0.009146341463414634
+      },
+      "pneumonia": {
+        "n": 171,
+        "exact": 0.3684210526315789,
+        "adjacent": 0.5964912280701754,
+        "contradiction": 0.03508771929824561
+      },
+      "pneumothorax": {
+        "n": 145,
+        "exact": 0.47586206896551725,
+        "adjacent": 0.4689655172413793,
+        "contradiction": 0.05517241379310345
+      }
+    },
+    "contradiction_direction": {
+      "GT_improving__pred_worsening": 9,
+      "GT_worsening__pred_improving": 14
+    },
+    "path": "results/maira2_judge/predictions_20260416_215652.csv"
+  },
+  {
+    "label": "maira2_judge_specific",
+    "overall": {
+      "n": 1035,
+      "exact": 0.41352657004830917,
+      "adjacent": 0.5381642512077295,
+      "contradiction": 0.04830917874396135
+    },
+    "per_finding": {
+      "consolidation": {
+        "n": 168,
+        "exact": 0.5178571428571429,
+        "adjacent": 0.4166666666666667,
+        "contradiction": 0.06547619047619048
+      },
+      "edema": {
+        "n": 223,
+        "exact": 0.2914798206278027,
+        "adjacent": 0.695067264573991,
+        "contradiction": 0.013452914798206279
+      },
+      "pleural_effusion": {
+        "n": 328,
+        "exact": 0.43597560975609756,
+        "adjacent": 0.5213414634146342,
+        "contradiction": 0.042682926829268296
+      },
+      "pneumonia": {
+        "n": 171,
+        "exact": 0.34502923976608185,
+        "adjacent": 0.5906432748538012,
+        "contradiction": 0.06432748538011696
+      },
+      "pneumothorax": {
+        "n": 145,
+        "exact": 0.5103448275862069,
+        "adjacent": 0.41379310344827586,
+        "contradiction": 0.07586206896551724
+      }
+    },
+    "contradiction_direction": {
+      "GT_improving__pred_worsening": 20,
+      "GT_worsening__pred_improving": 30
+    },
+    "path": "results/maira2_judge_specific/predictions_20260416_222741.csv"
+  }
+]
