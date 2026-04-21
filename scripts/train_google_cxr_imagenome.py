@@ -33,6 +33,7 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 from sklearn.metrics import balanced_accuracy_score, f1_score
@@ -87,18 +88,21 @@ def make_loader(feats: np.ndarray, labels: np.ndarray, batch_size: int, shuffle:
     return DataLoader(TensorDataset(X, y), batch_size=batch_size, shuffle=shuffle, pin_memory=True)
 
 
-def evaluate(model: nn.Module, loader: DataLoader, device: str) -> tuple[float, float]:
+def evaluate(model: nn.Module, loader: DataLoader, device: str, return_logits: bool = False):
     model.eval()
-    all_preds, all_labels = [], []
+    all_logits, all_labels = [], []
     with torch.no_grad():
         for X, y in loader:
-            preds = model(X.to(device)).argmax(1).cpu().numpy()
-            all_preds.extend(preds)
+            logits = model(X.to(device))
+            all_logits.append(logits.float().cpu().numpy())
             all_labels.extend(y.numpy())
-    y_pred = np.array(all_preds)
+    logits_arr = np.concatenate(all_logits, axis=0)
+    y_pred = logits_arr.argmax(axis=1)
     y_true = np.array(all_labels)
     macro_acc = float(balanced_accuracy_score(y_true, y_pred))
     macro_f1 = float(f1_score(y_true, y_pred, average="macro", zero_division=0))
+    if return_logits:
+        return macro_acc, macro_f1, logits_arr, y_true
     return macro_acc, macro_f1
 
 
@@ -170,11 +174,32 @@ def train_one_finding(
             break
 
     model.load_state_dict(best_state)
-    test_acc, test_f1 = evaluate(model, test_loader, device)
+    test_acc, test_f1, test_logits, test_y_true = evaluate(
+        model, test_loader, device, return_logits=True,
+    )
     logger.info(
         "[%s seed=%d] MS-CXR-T test — macro_acc=%.3f  macro_f1=%.3f  (best_val=%.3f)",
         finding, seed, test_acc, test_f1, best_val_acc,
     )
+
+    # Save per-sample logits + predictions
+    preds_dir = Path("results/predictions/google_cxr_imagenome")
+    preds_dir.mkdir(parents=True, exist_ok=True)
+    label_names = ["improving", "stable", "worsening"]
+    preds_df = pd.DataFrame({
+        "finding": finding,
+        "gt_label": test_y_true,
+        "ground_truth": [label_names[int(y)] for y in test_y_true],
+        "pred_label": test_logits.argmax(axis=1),
+        "predicted": [label_names[int(p)] for p in test_logits.argmax(axis=1)],
+        "logit_improving": test_logits[:, 0],
+        "logit_stable": test_logits[:, 1],
+        "logit_worsening": test_logits[:, 2],
+    })
+    preds_path = preds_dir / f"{finding}_seed{seed}_predictions.csv"
+    preds_df.to_csv(preds_path, index=False)
+    logger.info("  saved per-sample predictions → %s", preds_path)
+
     return {
         "model": "google_cxr_imagenome",
         "finding": finding,
@@ -182,6 +207,7 @@ def train_one_finding(
         "macro_acc": test_acc,
         "macro_f1": test_f1,
         "best_val_macro_acc": best_val_acc,
+        "predictions_csv": str(preds_path),
     }
 
 

@@ -192,19 +192,21 @@ def compute_class_weights(y: np.ndarray, num_classes: int = 3) -> torch.Tensor:
     return torch.tensor(weights, dtype=torch.float32)
 
 
-def evaluate(model, loader, device):
+def evaluate(model, loader, device, return_logits=False):
     model.eval()
-    all_preds, all_labels = [], []
+    all_logits, all_labels = [], []
     with torch.no_grad():
         for img_prior, img_curr, labels in loader:
             logits = model(img_prior.to(device), img_curr.to(device))
-            preds = logits.argmax(1).cpu().numpy()
-            all_preds.extend(preds)
+            all_logits.append(logits.float().cpu().numpy())
             all_labels.extend(labels.numpy())
-    y_pred = np.array(all_preds)
+    logits_arr = np.concatenate(all_logits, axis=0)
+    y_pred = logits_arr.argmax(axis=1)
     y_true = np.array(all_labels)
     macro_acc = float(balanced_accuracy_score(y_true, y_pred))
     macro_f1 = float(f1_score(y_true, y_pred, average="macro", zero_division=0))
+    if return_logits:
+        return macro_acc, macro_f1, logits_arr, y_true
     return macro_acc, macro_f1
 
 
@@ -360,19 +362,41 @@ def train_one_finding(
             logger.info("[%s seed=%d] Early stop at epoch %d", finding, seed, ep + 1)
             break
 
-    # Test on MS-CXR-T
+    # Test on MS-CXR-T (save per-sample logits + predictions to avoid ever
+    # needing to re-eval from checkpoints).
     model.load_state_dict(best_state)
-    test_acc, test_f1 = evaluate(model, test_loader, device)
+    test_acc, test_f1, test_logits, test_y_true = evaluate(
+        model, test_loader, device, return_logits=True,
+    )
     logger.info(
         "[%s seed=%d] MS-CXR-T test — macro_acc=%.3f  macro_f1=%.3f  (best_val=%.3f)",
         finding, seed, test_acc, test_f1, best_val_acc,
     )
+
+    preds_dir = Path("results/predictions/biovil_t_imagenome")
+    preds_dir.mkdir(parents=True, exist_ok=True)
+    label_names = ["improving", "stable", "worsening"]
+    preds_df = df_test.reset_index(drop=True).copy()
+    preds_df = preds_df.assign(
+        gt_label=test_y_true,
+        ground_truth=[label_names[int(y)] for y in test_y_true],
+        pred_label=test_logits.argmax(axis=1),
+        predicted=[label_names[int(p)] for p in test_logits.argmax(axis=1)],
+        logit_improving=test_logits[:, 0],
+        logit_stable=test_logits[:, 1],
+        logit_worsening=test_logits[:, 2],
+    )
+    preds_path = preds_dir / f"{finding}_seed{seed}_predictions.csv"
+    preds_df.to_csv(preds_path, index=False)
+    logger.info("  saved per-sample predictions → %s", preds_path)
+
     return {
         "finding": finding,
         "seed": seed,
         "macro_acc": test_acc,
         "macro_f1": test_f1,
         "best_val_macro_acc": best_val_acc,
+        "predictions_csv": str(preds_path),
     }
 
 

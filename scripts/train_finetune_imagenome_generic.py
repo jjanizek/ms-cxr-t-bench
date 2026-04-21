@@ -239,16 +239,22 @@ def compute_class_weights(y: np.ndarray, num_classes: int = 3) -> torch.Tensor:
     return torch.tensor(counts.sum() / (num_classes * counts), dtype=torch.float32)
 
 
-def evaluate(model, loader, device):
+def evaluate(model, loader, device, return_logits=False):
     model.eval()
-    all_preds, all_labels = [], []
+    all_logits, all_labels = [], []
     with torch.no_grad():
         for img_prior, img_curr, labels in loader:
             logits = model(img_prior.to(device), img_curr.to(device))
-            all_preds.extend(logits.argmax(1).cpu().numpy())
+            all_logits.append(logits.float().cpu().numpy())
             all_labels.extend(labels.numpy())
-    y_pred, y_true = np.array(all_preds), np.array(all_labels)
-    return float(balanced_accuracy_score(y_true, y_pred)), float(f1_score(y_true, y_pred, average="macro", zero_division=0))
+    logits_arr = np.concatenate(all_logits, axis=0)
+    y_pred = logits_arr.argmax(axis=1)
+    y_true = np.array(all_labels)
+    macro_acc = float(balanced_accuracy_score(y_true, y_pred))
+    macro_f1 = float(f1_score(y_true, y_pred, average="macro", zero_division=0))
+    if return_logits:
+        return macro_acc, macro_f1, logits_arr, y_true
+    return macro_acc, macro_f1
 
 
 def train_one_finding(
@@ -383,7 +389,10 @@ def train_one_finding(
             best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
             no_improve = 0
             if ckpt_dir:
-                torch.save(best_state, Path(ckpt_dir) / f"{model_name}_{finding}_seed{seed}_best.pt")
+                # Include head_type in the filename to prevent a later head_type
+                # run from overwriting an earlier one (both share model_name).
+                ckpt_path = Path(ckpt_dir) / f"{model_name}_{head_type}_{finding}_seed{seed}_best.pt"
+                torch.save(best_state, ckpt_path)
         else:
             no_improve += 1
 
@@ -393,15 +402,37 @@ def train_one_finding(
             break
 
     model.load_state_dict(best_state)
-    test_acc, test_f1 = evaluate(model, test_loader, device)
+    test_acc, test_f1, test_logits, test_y_true = evaluate(
+        model, test_loader, device, return_logits=True,
+    )
     logger.info(
         "[%s %s seed=%d] MS-CXR-T test — macro_acc=%.3f  macro_f1=%.3f  (best_val=%.3f)",
         model_name, finding, seed, test_acc, test_f1, best_val_acc,
     )
+
+    # Save per-sample logits + predictions (so we never need to re-eval).
+    preds_dir = Path(f"results/predictions/{model_name}_{head_type}")
+    preds_dir.mkdir(parents=True, exist_ok=True)
+    label_names = ["improving", "stable", "worsening"]
+    preds_df = df_test.reset_index(drop=True).copy()
+    preds_df = preds_df.assign(
+        gt_label=test_y_true,
+        ground_truth=[label_names[int(y)] for y in test_y_true],
+        pred_label=test_logits.argmax(axis=1),
+        predicted=[label_names[int(p)] for p in test_logits.argmax(axis=1)],
+        logit_improving=test_logits[:, 0],
+        logit_stable=test_logits[:, 1],
+        logit_worsening=test_logits[:, 2],
+    )
+    preds_path = preds_dir / f"{finding}_seed{seed}_predictions.csv"
+    preds_df.to_csv(preds_path, index=False)
+    logger.info("  saved per-sample predictions → %s", preds_path)
+
     return {
-        "model": model_name, "finding": finding, "seed": seed,
+        "model": model_name, "head_type": head_type, "finding": finding, "seed": seed,
         "macro_acc": test_acc, "macro_f1": test_f1,
         "best_val_macro_acc": best_val_acc,
+        "predictions_csv": str(preds_path),
     }
 
 

@@ -135,9 +135,14 @@ def main():
     args = parser.parse_args()
 
     if args.predictions is None:
-        candidates = sorted(set(
-            glob.glob("results/maira2_judge*/predictions_*.csv")
-        ))
+        # MAIRA-2 judge outputs (per-model CSV) + discriminative re-eval outputs
+        # (per-model CSV covering all findings) + train-time dumps (per-finding CSVs).
+        patterns = [
+            "results/maira2_judge*/predictions_*.csv",
+            "results/reeval/*_predictions.csv",
+            "results/predictions/*/*_predictions.csv",
+        ]
+        candidates = sorted({p for pat in patterns for p in glob.glob(pat)})
         if not candidates:
             print("No predictions CSVs found under results/. "
                   "Pass --predictions explicitly.")
@@ -151,8 +156,9 @@ def main():
             print(f"skipping missing: {path}")
             continue
         df = load_predictions(path)
-        # Nice label: "maira2_judge" or "maira2_judge_specific"
-        label = path.parent.name
+        # Label: include filename stem so per-finding train-time dumps don't
+        # all collapse to the same parent-dir name.
+        label = f"{path.parent.name}/{path.stem}"
         r = analyze_predictions(df, label)
         r["path"] = str(path)
         results.append(r)

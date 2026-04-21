@@ -1,6 +1,6 @@
 [
   {
-    "label": "maira2_judge",
+    "label": "maira2_judge/predictions_20260416_215652",
     "overall": {
       "n": 1035,
       "exact": 0.42995169082125606,
@@ -46,7 +46,7 @@
     "path": "results/maira2_judge/predictions_20260416_215652.csv"
   },
   {
-    "label": "maira2_judge_specific",
+    "label": "maira2_judge_specific/predictions_20260416_222741",
     "overall": {
       "n": 1035,
       "exact": 0.41352657004830917,
@@ -90,5 +90,143 @@
       "GT_worsening__pred_improving": 30
     },
     "path": "results/maira2_judge_specific/predictions_20260416_222741.csv"
+  },
+  {
+    "label": "reeval/biovil_t_imagenome_seed42_predictions",
+    "overall": {
+      "n": 1035,
+      "exact": 0.6173913043478261,
+      "adjacent": 0.3458937198067633,
+      "contradiction": 0.03671497584541063
+    },
+    "per_finding": {
+      "consolidation": {
+        "n": 168,
+        "exact": 0.6071428571428571,
+        "adjacent": 0.35119047619047616,
+        "contradiction": 0.041666666666666664
+      },
+      "edema": {
+        "n": 223,
+        "exact": 0.6322869955156951,
+        "adjacent": 0.34080717488789236,
+        "contradiction": 0.026905829596412557
+      },
+      "pleural_effusion": {
+        "n": 328,
+        "exact": 0.6341463414634146,
+        "adjacent": 0.34146341463414637,
+        "contradiction": 0.024390243902439025
+      },
+      "pneumonia": {
+        "n": 171,
+        "exact": 0.6783625730994152,
+        "adjacent": 0.2631578947368421,
+        "contradiction": 0.05847953216374269
+      },
+      "pneumothorax": {
+        "n": 145,
+        "exact": 0.496551724137931,
+        "adjacent": 0.45517241379310347,
+        "contradiction": 0.04827586206896552
+      }
+    },
+    "contradiction_direction": {
+      "GT_improving__pred_worsening": 13,
+      "GT_worsening__pred_improving": 25
+    },
+    "path": "results/reeval/biovil_t_imagenome_seed42_predictions.csv"
+  },
+  {
+    "label": "reeval/google_cxr_imagenome_seed42_predictions",
+    "overall": {
+      "n": 1035,
+      "exact": 0.58743961352657,
+      "adjacent": 0.3710144927536232,
+      "contradiction": 0.04154589371980676
+    },
+    "per_finding": {
+      "consolidation": {
+        "n": 168,
+        "exact": 0.5595238095238095,
+        "adjacent": 0.4226190476190476,
+        "contradiction": 0.017857142857142856
+      },
+      "edema": {
+        "n": 223,
+        "exact": 0.6188340807174888,
+        "adjacent": 0.35874439461883406,
+        "contradiction": 0.02242152466367713
+      },
+      "pleural_effusion": {
+        "n": 328,
+        "exact": 0.6432926829268293,
+        "adjacent": 0.3323170731707317,
+        "contradiction": 0.024390243902439025
+      },
+      "pneumonia": {
+        "n": 171,
+        "exact": 0.5964912280701754,
+        "adjacent": 0.3391812865497076,
+        "contradiction": 0.06432748538011696
+      },
+      "pneumothorax": {
+        "n": 145,
+        "exact": 0.43448275862068964,
+        "adjacent": 0.45517241379310347,
+        "contradiction": 0.1103448275862069
+      }
+    },
+    "contradiction_direction": {
+      "GT_improving__pred_worsening": 13,
+      "GT_worsening__pred_improving": 30
+    },
+    "path": "results/reeval/google_cxr_imagenome_seed42_predictions.csv"
+  },
+  {
+    "label": "reeval/imagenet_densenet121_attn_seed42_predictions",
+    "overall": {
+      "n": 1035,
+      "exact": 0.5526570048309178,
+      "adjacent": 0.39516908212560387,
+      "contradiction": 0.05217391304347826
+    },
+    "per_finding": {
+      "consolidation": {
+        "n": 168,
+        "exact": 0.48214285714285715,
+        "adjacent": 0.43452380952380953,
+        "contradiction": 0.08333333333333333
+      },
+      "edema": {
+        "n": 223,
+        "exact": 0.6591928251121076,
+        "adjacent": 0.30493273542600896,
+        "contradiction": 0.03587443946188341
+      },
+      "pleural_effusion": {
+        "n": 328,
+        "exact": 0.5914634146341463,
+        "adjacent": 0.3932926829268293,
+        "contradiction": 0.01524390243902439
+      },
+      "pneumonia": {
+        "n": 171,
+        "exact": 0.5614035087719298,
+        "adjacent": 0.3742690058479532,
+        "contradiction": 0.06432748538011696
+      },
+      "pneumothorax": {
+        "n": 145,
+        "exact": 0.3724137931034483,
+        "adjacent": 0.5172413793103449,
+        "contradiction": 0.1103448275862069
+      }
+    },
+    "contradiction_direction": {
+      "GT_improving__pred_worsening": 23,
+      "GT_worsening__pred_improving": 31
+    },
+    "path": "results/reeval/imagenet_densenet121_attn_seed42_predictions.csv"
   }
 ]
