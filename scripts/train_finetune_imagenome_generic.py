@@ -122,16 +122,26 @@ class ConcatPairClassifier(nn.Module):
             nn.Linear(hidden, num_classes),
         )
 
-    def set_final_bias_to_log_priors(self, label_counts: np.ndarray) -> None:
-        """Initialise final-layer bias to log class priors so the model starts
-        at the training class distribution (the correct starting point before
-        seeing features). Helps gradient signal when classes are balanced.
+    def set_final_bias_to_log_priors(self, label_counts: np.ndarray, perturb_std: float = 0.05) -> None:
+        """Initialise final-layer bias to log class priors plus a small
+        Gaussian perturbation.
+
+        For nearly balanced classes (e.g. edema/pneumothorax in MS-CXR-T
+        ImaGenome pairs) the log-prior bias is ≈ 0, which leaves only the
+        Kaiming-default head weight noise to break symmetry. On a 600M
+        backbone that proved insufficient — full FT runs sat at the
+        log-K saddle for 11+ epochs and early-stopped at chance. The added
+        perturbation is small enough not to disturb learning when log-priors
+        are informative, but large enough to guarantee asymmetric initial
+        logits regardless of class distribution.
         """
         priors = label_counts / label_counts.sum()
         log_priors = np.log(np.clip(priors, 1e-6, None)).astype(np.float32)
+        bias_np = log_priors - log_priors.mean()
         final = self.head[-1]
         with torch.no_grad():
-            final.bias.copy_(torch.from_numpy(log_priors - log_priors.mean()))
+            final.bias.copy_(torch.from_numpy(bias_np))
+            final.bias.add_(torch.randn_like(final.bias) * perturb_std)
 
     def forward(self, img_prior: torch.Tensor, img_curr: torch.Tensor) -> torch.Tensor:
         f_prior = self.encoder(img_prior)   # (B, D)
@@ -184,11 +194,12 @@ class CrossAttnPairClassifier(nn.Module):
         attn_out, _ = self.attn(query=q, key=kv, value=kv)  # (B, 1, D)
         return self.head(self.norm(attn_out[:, 0]))
 
-    def set_final_bias_to_log_priors(self, label_counts: np.ndarray) -> None:
+    def set_final_bias_to_log_priors(self, label_counts: np.ndarray, perturb_std: float = 0.05) -> None:
         priors = label_counts / label_counts.sum()
         log_priors = np.log(np.clip(priors, 1e-6, None)).astype(np.float32)
         with torch.no_grad():
             self.head.bias.copy_(torch.from_numpy(log_priors - log_priors.mean()))
+            self.head.bias.add_(torch.randn_like(self.head.bias) * perturb_std)
 
     def backbone_parameters(self):
         return self.encoder.parameters()
@@ -198,11 +209,12 @@ class CrossAttnPairClassifier(nn.Module):
         return (p for p in self.parameters() if id(p) not in encoder_ids)
 
 
-def load_encoder(model_name: str, device: str):
+def load_encoder(model_name: str, device: str, gradient_checkpointing: bool = False):
     """Load a PyTorch encoder by name. Returns (encoder_module, embed_dim).
 
-    The returned module must accept a (B, 3, H, W) ImageNet-normalized tensor
-    and return a (B, embed_dim) global-pooled embedding.
+    The returned module must accept an image tensor and return a
+    (B, embed_dim) global-pooled embedding. Most models here take (B, 3, H, W)
+    ImageNet-normalized input; smb_vision_v1_cxr takes (B, 1, H, W) grayscale.
     """
     if model_name == "imagenet_densenet121":
         from torchvision.models import densenet121, DenseNet121_Weights
@@ -216,6 +228,11 @@ def load_encoder(model_name: str, device: str):
         m.fc = nn.Identity()  # forward now returns (B, 2048)
         return m, 2048
 
+    if model_name == "smb_vision_v1_cxr":
+        from models.smb_vision import SMBVisionEncoderWrapper
+        m = SMBVisionEncoderWrapper(gradient_checkpointing=gradient_checkpointing)
+        return m, m.embed_dim  # 2048 (out_hidden_size after merger)
+
     if model_name == "ours":
         raise NotImplementedError(
             "Our foundation model is not yet integrated. "
@@ -224,10 +241,15 @@ def load_encoder(model_name: str, device: str):
 
     raise ValueError(
         f"Unknown model '{model_name}'. "
-        f"Supported: imagenet_densenet121, imagenet_resnet50, ours. "
+        f"Supported: imagenet_densenet121, imagenet_resnet50, smb_vision_v1_cxr, ours. "
         f"For BioViL-T use train_biovil_t_imagenome.py. "
         f"For Google CXR use extract_google_cxr_imagenome_features.py + train_google_cxr_imagenome.py."
     )
+
+
+# Models that take single-channel grayscale (B, 1, H, W) input instead of the
+# default 3-channel ImageNet-normalized input.
+GRAYSCALE_MODELS = {"smb_vision_v1_cxr"}
 
 
 # ---------------------------------------------------------------------------
@@ -264,34 +286,53 @@ def train_one_finding(
     grad_accum_steps=4, use_amp=True, head_type="concat",
     backbone_lr=1e-5, head_lr=1e-3, weight_decay=1e-4,
     patience=10, num_workers=8, class_weight=True, ckpt_dir=None,
+    gradient_checkpointing=False, input_size=448,
+    bias_perturb_std=0.05,
 ):
     torch.manual_seed(seed)
     np.random.seed(seed)
 
     from torchvision import transforms
 
-    # ImageNet-pretrained models expect 3-channel RGB + ImageNet-normalised input.
+    # Most pretrained models expect 3-channel RGB + ImageNet-normalised input.
     # health_multimodal.load_image returns PIL 'L' (grayscale); .convert('RGB')
     # replicates the single channel 3× which is the standard CXR-on-ImageNet
     # fine-tuning convention (CheXNet, TorchXRayVision, etc.).
-    to_rgb = transforms.Lambda(lambda img: img.convert("RGB"))
+    #
+    # Models in GRAYSCALE_MODELS take a single grayscale channel instead. We
+    # keep the PIL image as mode 'L' and normalise with a single mean/std
+    # (MIMIC CXR roughly centred at 0.5 after ToTensor).
+    grayscale = model_name in GRAYSCALE_MODELS
+
+    if grayscale:
+        to_mode = transforms.Lambda(lambda img: img.convert("L"))
+        normalize = transforms.Normalize(mean=[0.5], std=[0.5])
+    else:
+        to_mode = transforms.Lambda(lambda img: img.convert("RGB"))
+        normalize = transforms.Normalize(
+            mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+        )
+
+    # input_size is the final crop; we resize to input_size+64 first so there
+    # is some margin for the random crop (matches the canonical 512→448 ratio).
+    resize_size = input_size + 64
     train_transform = transforms.Compose([
-        to_rgb,
-        transforms.Resize(512),
-        transforms.RandomCrop(448),
+        to_mode,
+        transforms.Resize(resize_size),
+        transforms.RandomCrop(input_size),
         transforms.RandomHorizontalFlip(),
         transforms.RandomAffine(degrees=30, shear=15),
         transforms.ColorJitter(brightness=0.2, contrast=0.2),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        normalize,
         transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0)),
     ])
     val_transform = transforms.Compose([
-        to_rgb,
-        transforms.Resize(512),
-        transforms.CenterCrop(448),
+        to_mode,
+        transforms.Resize(resize_size),
+        transforms.CenterCrop(input_size),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        normalize,
     ])
 
     train_ds = ImaGenomePairDataset(df_train, imagenome_lookup, train_transform)
@@ -305,7 +346,7 @@ def train_one_finding(
     criterion_weight = compute_class_weights(df_train["label"].values).to(device) if class_weight else None
     criterion = nn.CrossEntropyLoss(weight=criterion_weight)
 
-    encoder, embed_dim = load_encoder(model_name, device)
+    encoder, embed_dim = load_encoder(model_name, device, gradient_checkpointing=gradient_checkpointing)
     if head_type == "concat":
         model = ConcatPairClassifier(encoder, embed_dim)
     elif head_type == "attention":
@@ -313,7 +354,7 @@ def train_one_finding(
     else:
         raise ValueError(f"Unknown head_type: {head_type}")
     label_counts = np.bincount(df_train["label"].values, minlength=3)
-    model.set_final_bias_to_log_priors(label_counts)
+    model.set_final_bias_to_log_priors(label_counts, perturb_std=bias_perturb_std)
     model = model.to(device)
     # bf16 avoids fp16 overflow issues common with DenseNet-style concat
     # architectures and doesn't need GradScaler (fp32-range exponent).
@@ -358,6 +399,10 @@ def train_one_finding(
     from torch.optim.lr_scheduler import LambdaLR
     scheduler = LambdaLR(opt, lr_lambda)
 
+    # Suffix non-default input_size into output paths so 768 runs don't
+    # overwrite 448 checkpoints / predictions / result JSONs.
+    size_tag = "" if input_size == 448 else f"_in{input_size}"
+
     best_val_acc, best_state, no_improve = -1.0, None, 0
     for ep in range(epochs):
         model.train()
@@ -389,9 +434,7 @@ def train_one_finding(
             best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
             no_improve = 0
             if ckpt_dir:
-                # Include head_type in the filename to prevent a later head_type
-                # run from overwriting an earlier one (both share model_name).
-                ckpt_path = Path(ckpt_dir) / f"{model_name}_{head_type}_{finding}_seed{seed}_best.pt"
+                ckpt_path = Path(ckpt_dir) / f"{model_name}_{head_type}{size_tag}_{finding}_seed{seed}_best.pt"
                 torch.save(best_state, ckpt_path)
         else:
             no_improve += 1
@@ -411,7 +454,7 @@ def train_one_finding(
     )
 
     # Save per-sample logits + predictions (so we never need to re-eval).
-    preds_dir = Path(f"results/predictions/{model_name}_{head_type}")
+    preds_dir = Path(f"results/predictions/{model_name}_{head_type}{size_tag}")
     preds_dir.mkdir(parents=True, exist_ok=True)
     label_names = ["improving", "stable", "worsening"]
     preds_df = df_test.reset_index(drop=True).copy()
@@ -468,6 +511,17 @@ def main():
     parser.add_argument("--patience", type=int, default=10)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--ckpt_dir", default="checkpoints/imagenome_generic")
+    parser.add_argument("--gradient_checkpointing", action="store_true",
+                        help="Enable gradient checkpointing on encoder blocks (slower, less memory). "
+                             "Needed for large transformer encoders like smb_vision_v1_cxr.")
+    parser.add_argument("--input_size", type=int, default=448,
+                        help="Final crop size. Resize is input_size+64. Must be a multiple of "
+                             "(patch_size * spatial_merge_size) for transformer encoders (32 for smb_vision_v1_cxr).")
+    parser.add_argument("--bias_perturb_std", type=float, default=0.05,
+                        help="Std-dev of Gaussian noise added to the final-layer bias on top of "
+                             "the log-prior init. Larger values guarantee escape from the symmetry-locked "
+                             "saddle on near-balanced findings. Bumped above 0.05 if a finding is observed "
+                             "to sit at chance for many epochs.")
     args = parser.parse_args()
 
     import pandas as pd
@@ -515,6 +569,9 @@ def main():
                 backbone_lr=args.backbone_lr, head_lr=args.head_lr,
                 patience=args.patience, num_workers=args.num_workers,
                 ckpt_dir=args.ckpt_dir,
+                gradient_checkpointing=args.gradient_checkpointing,
+                input_size=args.input_size,
+                bias_perturb_std=args.bias_perturb_std,
             )
             if result:
                 all_results.append(result)
@@ -535,6 +592,8 @@ def main():
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     tag = args.head_type if args.head_type != "concat" else ""
     suffix = f"_{tag}" if tag else ""
+    if args.input_size != 448:
+        suffix += f"_in{args.input_size}"
     out = Path("results") / f"{args.model}{suffix}_imagenome_{timestamp}.json"
     with open(out, "w") as f:
         json.dump({
