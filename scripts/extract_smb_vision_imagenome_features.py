@@ -56,21 +56,25 @@ class ImagePathDataset(Dataset):
         return self.transform(img)
 
 
-def build_val_transform():
-    """Same val transform as the end-to-end fine-tune (grayscale, 0.5/0.5)."""
+def build_val_transform(input_size: int = 448):
+    """Same val transform as the end-to-end fine-tune (grayscale, 0.5/0.5).
+
+    Resize to input_size + 64, center-crop to input_size — matches the
+    canonical 512→448 ratio when input_size==448.
+    """
     return transforms.Compose([
         transforms.Lambda(lambda img: img.convert("L")),
-        transforms.Resize(512),
-        transforms.CenterCrop(448),
+        transforms.Resize(input_size + 64),
+        transforms.CenterCrop(input_size),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.5], std=[0.5]),
     ])
 
 
 @torch.no_grad()
-def encode_paths(paths: list[str], model, device: str, batch_size: int, num_workers: int) -> dict[str, np.ndarray]:
+def encode_paths(paths: list[str], model, device: str, batch_size: int, num_workers: int, input_size: int = 448) -> dict[str, np.ndarray]:
     """Encode each unique path once → dict{path -> (D,) float32}."""
-    transform = build_val_transform()
+    transform = build_val_transform(input_size=input_size)
     ds = ImagePathDataset(paths, transform)
     loader = DataLoader(
         ds, batch_size=batch_size, shuffle=False,
@@ -105,6 +109,11 @@ def main():
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--num_workers", type=int, default=8)
+    parser.add_argument("--pooling_mode", choices=["merger", "deepstack_concat"], default="merger",
+                        help="Encoder pooling. 'merger' = final merger output (2048-d). "
+                             "'deepstack_concat' = final + 3 deepstack levels (8192-d).")
+    parser.add_argument("--input_size", type=int, default=448,
+                        help="Image input crop size (must be multiple of 32 = patch*spatial_merge).")
     args = parser.parse_args()
 
     from data.dataset import FINDINGS
@@ -155,12 +164,18 @@ def main():
     )
 
     # Load model once
-    model = SMBVisionEncoderWrapper(gradient_checkpointing=False).to(args.device).eval()
-    logger.info("SMB encoder loaded on %s, embed_dim=%d", args.device, model.embed_dim)
+    model = SMBVisionEncoderWrapper(
+        gradient_checkpointing=False, pooling_mode=args.pooling_mode,
+    ).to(args.device).eval()
+    logger.info(
+        "SMB encoder loaded on %s, pooling_mode=%s, embed_dim=%d",
+        args.device, args.pooling_mode, model.embed_dim,
+    )
 
     embed_cache = encode_paths(
         unique_paths, model, args.device,
         batch_size=args.batch_size, num_workers=args.num_workers,
+        input_size=args.input_size,
     )
     logger.info("Encoded %d unique images.", len(embed_cache))
 

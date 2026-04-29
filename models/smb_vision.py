@@ -71,9 +71,13 @@ _shim_transformers_for_smb()
 class SMBVisionEncoderWrapper(nn.Module):
     """Wraps the SMB vision encoder to expose a standard (B,1,H,W) -> (B,D) API.
 
-    Pooling: run the trained `merger` (spatial_merge_size=2 → 2048-dim), then
-    mean-pool the merged tokens per image. Using the trained merger preserves
-    more pretrained signal than mean-pooling the raw 1152-dim tokens.
+    Pooling modes:
+      - "merger" (default): run the trained spatial-merge=2 merger on the final
+        layer's tokens, mean-pool → (B, 2048).
+      - "deepstack_concat": mean-pool the 3 trained deepstack mergers' outputs
+        (taken from layers in vision_config.deepstack_visual_indexes — typically
+        [8, 16, 24]) plus the final merger output, then concatenate → (B, 4*2048).
+        Captures multi-resolution features.
 
     H and W must be multiples of (patch_size * spatial_merge_size) = 32 so the
     merger's reshape is well-defined.
@@ -85,6 +89,7 @@ class SMBVisionEncoderWrapper(nn.Module):
         attn_implementation: str = "sdpa",
         gradient_checkpointing: bool = False,
         torch_dtype: torch.dtype = torch.float32,
+        pooling_mode: str = "merger",
     ):
         super().__init__()
         # AutoModel's loader trips over `config_class` being None on the
@@ -120,9 +125,17 @@ class SMBVisionEncoderWrapper(nn.Module):
             for blk in self.encoder.blocks:
                 blk.gradient_checkpointing = True
 
+        if pooling_mode not in ("merger", "deepstack_concat"):
+            raise ValueError(f"Unknown pooling_mode: {pooling_mode}")
+        self.pooling_mode = pooling_mode
+        self.num_deepstack_levels = len(self.encoder.config.deepstack_visual_indexes)
+
     @property
     def embed_dim(self) -> int:
-        return self.out_hidden_size  # 2048 after merger
+        if self.pooling_mode == "deepstack_concat":
+            # final merger + N deepstack mergers, all out_hidden_size each
+            return self.out_hidden_size * (1 + self.num_deepstack_levels)
+        return self.out_hidden_size  # 2048
 
     def _patchify(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """(B, 1, H, W) grayscale float tensor → (pixels_flat, grid_thw).
@@ -169,10 +182,21 @@ class SMBVisionEncoderWrapper(nn.Module):
         pixel_values, grid_thw = self._patchify(x)
         # Match encoder's parameter dtype (patch_embed conv weights).
         pixel_values = pixel_values.to(self.encoder.patch_embed.proj_c1.weight.dtype)
-        hidden_states, _deepstack = self.encoder(pixel_values, grid_thw)
+        hidden_states, deepstack_features = self.encoder(pixel_values, grid_thw)
         # hidden_states: (B*h*w, 1152). Apply trained merger → (B*h*w/4, 2048).
         merged = self.encoder.merger(hidden_states)
         B = x.shape[0]
-        merged = merged.view(B, -1, self.out_hidden_size)  # (B, h*w/4, 2048)
-        pooled = merged.mean(dim=1)  # (B, 2048)
-        return pooled
+        D = self.out_hidden_size
+        merged = merged.view(B, -1, D)             # (B, h*w/4, 2048)
+        pooled_final = merged.mean(dim=1)          # (B, 2048)
+
+        if self.pooling_mode == "merger":
+            return pooled_final
+
+        # deepstack_concat: pool each level then concat.
+        # deepstack_features is a list of (B*h*w/4, 2048) tensors (already merged).
+        levels = [pooled_final]
+        for ds in deepstack_features:
+            ds_pooled = ds.view(B, -1, D).mean(dim=1)  # (B, 2048)
+            levels.append(ds_pooled)
+        return torch.cat(levels, dim=1)            # (B, (1+L)*2048)

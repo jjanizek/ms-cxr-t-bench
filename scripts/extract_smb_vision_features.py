@@ -44,19 +44,19 @@ class ImagePathDataset(Dataset):
         return self.transform(img)
 
 
-def build_val_transform():
+def build_val_transform(input_size: int = 448):
     return transforms.Compose([
         transforms.Lambda(lambda img: img.convert("L")),
-        transforms.Resize(512),
-        transforms.CenterCrop(448),
+        transforms.Resize(input_size + 64),
+        transforms.CenterCrop(input_size),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.5], std=[0.5]),
     ])
 
 
 @torch.no_grad()
-def encode_paths(paths, model, device, batch_size, num_workers):
-    transform = build_val_transform()
+def encode_paths(paths, model, device, batch_size, num_workers, input_size: int = 448):
+    transform = build_val_transform(input_size=input_size)
     ds = ImagePathDataset(paths, transform)
     loader = DataLoader(
         ds, batch_size=batch_size, shuffle=False,
@@ -80,6 +80,8 @@ def main():
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--num_workers", type=int, default=8)
+    parser.add_argument("--pooling_mode", choices=["merger", "deepstack_concat"], default="merger")
+    parser.add_argument("--input_size", type=int, default=448)
     args = parser.parse_args()
 
     from data.dataset import load_labels, FINDINGS, dicom_id_to_filename
@@ -109,12 +111,15 @@ def main():
         pending, len(unique_paths),
     )
 
-    model = SMBVisionEncoderWrapper(gradient_checkpointing=False).to(args.device).eval()
-    logger.info("SMB encoder loaded, embed_dim=%d", model.embed_dim)
+    model = SMBVisionEncoderWrapper(
+        gradient_checkpointing=False, pooling_mode=args.pooling_mode,
+    ).to(args.device).eval()
+    logger.info("SMB encoder loaded, pooling_mode=%s, embed_dim=%d", args.pooling_mode, model.embed_dim)
 
     embed_cache = encode_paths(
         unique_paths, model, args.device,
         batch_size=args.batch_size, num_workers=args.num_workers,
+        input_size=args.input_size,
     )
     logger.info("Encoded %d unique images.", len(embed_cache))
 
