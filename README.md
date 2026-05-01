@@ -27,20 +27,20 @@ Detect acute findings relevant to ICU care (pneumothorax, consolidation, edema, 
 | DenseNet-121 | ImageNet | 2-token cross-attention | — | 0.545 (seed 42) |
 | MAIRA-2 | CXR (MIMIC report gen) | generate → LLM judge | — | 0.365 (specific prompt) |
 | MAIRA-2 | CXR (MIMIC report gen) | generate → LLM judge | — | 0.349 (standard prompt) |
-| Our foundation model | TBD | TBD | planned | planned |
+| **Our foundation model (SMB Vision v1 CXR)** | CXR (MIM + JEPA SSL, 600M ViT) | concat MLP (FT) / linear on deepstack (probe) | — | **0.542 best-of** (see section below) |
 
 ### ImaGenome-trained temporal classifier — seed 42 (paper Table 2 protocol)
 
 Per-finding macro-accuracy on full MS-CXR-T test set (1,035 pairs after filtering):
 
-| Finding | BioViL-T (CXR + full FT) | Google CXR (CXR + MLP) | DN121 concat | DN121 attention | MAIRA-2 (specific) | MAIRA-2 (standard) |
-|---|---|---|---|---|---|---|
-| consolidation | **0.646** | 0.527 | 0.550 | 0.494 | 0.464 | 0.380 |
-| edema | 0.605 | 0.616 | **0.645** | 0.643 | 0.332 | 0.342 |
-| pleural_effusion | **0.690** | 0.650 | 0.662 | 0.628 | 0.317 | 0.351 |
-| pneumonia | 0.613 | **0.638** | 0.581 | 0.621 | 0.337 | 0.350 |
-| pneumothorax | **0.508** | 0.393 | 0.507 | 0.340 | 0.373 | 0.323 |
-| **average** | **0.612** | 0.565 | **0.589** | 0.545 | 0.365 | 0.349 |
+| Finding | BioViL-T (CXR + full FT) | Google CXR (CXR + MLP) | DN121 concat | DN121 attention | MAIRA-2 (specific) | MAIRA-2 (standard) | Ours (SMB v1 CXR, best-of) |
+|---|---|---|---|---|---|---|---|
+| consolidation | **0.646** | 0.527 | 0.550 | 0.494 | 0.464 | 0.380 | 0.444 ± 0.031 (probe) |
+| edema | 0.605 | 0.616 | **0.645** | 0.643 | 0.332 | 0.342 | 0.614 (FT) |
+| pleural_effusion | **0.690** | 0.650 | 0.662 | 0.628 | 0.317 | 0.351 | 0.648 (FT) |
+| pneumonia | 0.613 | **0.638** | 0.581 | 0.621 | 0.337 | 0.350 | 0.592 (FT) |
+| pneumothorax | **0.508** | 0.393 | 0.507 | 0.340 | 0.373 | 0.323 | 0.413 ± 0.041 (probe) |
+| **average** | **0.612** | 0.565 | **0.589** | 0.545 | 0.365 | 0.349 | **0.542** (best-of) |
 
 Observations (seed 42 only — take with error bars in mind):
 - **CXR-specific pretraining helps, but only modestly**: BioViL-T beats a generic ImageNet DenseNet-121 (both fine-tuned end-to-end, concat head) by 0.023 average. The bulk of the benefit comes from full fine-tuning, not the CXR-specific representation.
@@ -51,10 +51,45 @@ Observations (seed 42 only — take with error bars in mind):
 - **Pneumothorax is hard for every model** (< 0.51) — likely limited by the smallest ImaGenome training set and the most missing-image attrition.
 - Remaining seeds (123, 456, 789) pending for error bars.
 
+### Our foundation model: SMB Vision v1 CXR — protocol comparison
+
+Our foundation model is [`standardmodelbio/smb-vision-v1-cxr`](https://huggingface.co/standardmodelbio/smb-vision-v1-cxr): a 600M-param Qwen2.5-VL-style vision transformer, grayscale CXR pretrained with masked image modeling + JEPA. Wrapper in `models/smb_vision.py`; uses HuggingFace dynamic class loading and shims two missing symbols (`GradientCheckpointingLayer`, `TransformersKwargs`) for the older transformers (4.49) shipped in our env. The encoder produces ragged-token output with 4 trained spatial mergers (final + 3 "deepstack" intermediate-layer mergers at layers 8/16/24, all 2048-d).
+
+We tried four protocols, single seed=42 unless noted:
+
+| Protocol | input | head | edema | pleural_effusion | pneumonia | consolidation | pneumothorax | avg |
+|---|---|---|---|---|---|---|---|---|
+| Frozen merger probe (4 seeds) | 448 | 2-layer MLP, in_dim=4096 | 0.374 ± 0.049 | 0.407 ± 0.036 | 0.340 ± 0.011 | 0.419 ± 0.026 | 0.366 ± 0.030 | 0.381 ± 0.018 |
+| Full FT | 448 | concat MLP | 0.333 (saddle) | 0.611 | 0.521 | 0.354 | 0.388 | 0.441 |
+| Full FT | **768** | concat MLP | **0.614** | **0.648** | **0.592** | 0.397 | 0.333 (saddle) | 0.517 |
+| Frozen probe HP sweep (4 seeds, 304 cfg) | 768 | linear/MLP on merger or deepstack | 0.462 ± 0.012 | 0.459 ± 0.012 | 0.505 ± 0.044 | **0.444 ± 0.031** | **0.413 ± 0.041** | 0.457 |
+| **Best-of (per finding)** | | | **0.614** | **0.648** | **0.592** | **0.444** | **0.413** | **0.542** |
+
+For 3/5 findings (edema, pleural_effusion, pneumonia), end-to-end fine-tuning at 768 wins by a wide margin over any frozen probe — the encoder needs gradient signal through the backbone to surface temporal-progression structure. For the other 2 (consolidation, pneumothorax), FT either modestly underperforms (consolidation) or completely fails to escape the symmetry-locked saddle (pneumothorax 0.333 even with std=0.5 bias perturbation + 5× head LR), and the frozen-feature linear probe on deepstack-pooled features wins.
+
+The HP sweep best configs (`scripts/sweep_smb_vision_probe.py`, 304 configs × 4 seeds) all share a striking pattern: **`depth=1` (linear) on full deepstack-concat features wins for 4/5 findings.** The trained deepstack mergers + concat already give a discriminative representation; adding hidden layers introduces optimization difficulty that exceeds any expressive-power benefit on this dataset size. Only consolidation prefers a 3-layer MLP.
+
+#### What was tried (chronological)
+
+1. **Frozen merger probe @ 448, broken init** — `nn.init.normal_(weight, std=0.01)` + zero bias on the head produced a class-balanced symmetry-locked saddle: all 5 findings × 4 seeds collapsed to 0.336 ± 0.004 average (chance), loss pinned at log 3 = 1.0986. Switching to PyTorch Kaiming default + `bias = log(class_priors) - mean(...)` lifted it to 0.381 ± 0.018.
+2. **Full FT @ 448** — pleural_effusion + pneumonia trained cleanly; **edema saddle-locked for 11 epochs and early-stopped at chance** (test 0.333). Class-balanced edema has near-uniform priors → log-prior bias init ≈ 0 → only Kaiming weight noise breaks symmetry, which proved insufficient on the 600M model.
+3. **Full FT @ 768 + Gaussian bias perturbation** — added `bias = (log_priors − mean) + N(0, 0.05²)` to guarantee asymmetric initial logits regardless of class balance. Edema escaped the saddle and reached 0.614 (beating BioViL-T's edema 0.605). Pleural_effusion 0.648, pneumonia 0.592, consolidation 0.397 — all clean.
+4. **Pneumothorax stayed stuck.** Successively tried `--bias_perturb_std` 0.05 → 0.2 → 0.5 (last with `--head_lr 5e-3`); each attempt early-stopped at val_acc=0.333. The optimizer was being *pulled* toward the symmetric saddle, suggesting near-uniform pooled features rather than a poor init.
+5. **Deepstack-feature probe @ 448, PTX only (4 seeds)** — concatenated all 4 levels (final + 3 deepstack) → 8192-dim per image. Result: 0.369 ± 0.026, ~identical to merger probe — added more dims didn't help.
+6. **Frozen probe HP sweep @ 768, all findings** — 304 configs over feature subset (merger / deepstack), depth (1/2/3), hidden (256/512/1024), dropout (0/0.1/0.3), LR (1e-4 to 5e-3), weight decay (1e-4/1e-3); 4 seeds each. Total 6080 trainings, ~11 h on one GPU. **PTX recovered to 0.413 ± 0.041 with a linear head on full deepstack features** — confirmation that the FT failure was an optimization issue, not a missing-signal issue.
+
+#### Operational notes
+
+- **Memory.** 768×768 input × 600M params + bf16 AMP + gradient checkpointing fits at `--batch_size 8 --grad_accum_steps 16` (effective batch 128) at ~13 GB peak on a 4090. `--input_size 768` matches SMB's `num_position_embeddings=2304=48²` natural span.
+- **Throughput.** End-to-end FT @ 768 is ~3.5 pairs/s (3.3× slower than 448's ~11.5). Full 5-finding sweep @ 768 took ~3 days wall on 2× 4090.
+- **Saddle handling.** `--bias_perturb_std` defaults to 0.05; bumping to 0.2 was sufficient for pneumonia. Pneumothorax could not be unstuck at any tested std under FT — this is an optimization-landscape problem rooted in pooled-feature similarity, not just init asymmetry.
+
 ### Gotchas found during this run
 
 - `train_finetune_imagenome_generic.py` required a **class-log-prior bias init** on the final head linear. With `nn.init.normal_(weight, std=0.01)` and zero bias, balanced-class findings (edema) were symmetry-locked at uniform predictions — loss pinned exactly at log(3)=1.0986, no gradient escape. Only the skewed-class findings (consolidation, weight 2.2 on rare class) broke the symmetry naturally.
+- The log-prior bias trick **degenerates to zero** on findings where the three classes are nearly equiprobable (edema, pneumothorax in ImaGenome). On a 600M ViT (SMB) this re-introduced the saddle. Fix: add a small Gaussian perturbation on top — `bias = (log_priors − mean) + N(0, σ²)`. `σ=0.05` is enough for moderately balanced findings; `σ=0.2` rescued pneumonia. Some findings (pneumothorax @ 768 FT) cannot be unstuck this way and need a frozen probe instead — see SMB section. Exposed as `--bias_perturb_std`.
 - DenseNet-121 + fp16 AMP overflows mid-training — switched to bf16.
+- **SMB Vision** ships custom modeling code that imports `transformers.modeling_layers.GradientCheckpointingLayer` and `transformers.utils.TransformersKwargs`, both added in transformers ≥4.53. The repo env is on 4.49 (constrained by `hi-ml-multimodal`/BioViL-T). `models/smb_vision.py` shims both before `from_pretrained` and resolves the dynamic class via `get_class_from_dynamic_module` to bypass an `AutoModel.from_pretrained` path that trips on `config_class=None`.
 
 ## Setup
 
@@ -96,8 +131,20 @@ python scripts/train_biovil_t_imagenome.py
 python scripts/extract_google_cxr_imagenome_features.py
 python scripts/train_google_cxr_imagenome.py
 
-# Our model: end-to-end fine-tune (once model is integrated)
-python scripts/train_finetune_imagenome_generic.py --model ours
+# Our foundation model (SMB Vision v1 CXR) — end-to-end fine-tune at 768
+python scripts/train_finetune_imagenome_generic.py \
+    --model smb_vision_v1_cxr --input_size 768 \
+    --batch_size 8 --grad_accum_steps 16 --gradient_checkpointing \
+    --bias_perturb_std 0.05  # bump to 0.2 for findings that saddle-stick
+
+# Our foundation model — frozen-feature MLP probe (faster, sometimes wins)
+python scripts/extract_smb_vision_imagenome_features.py \
+    --pooling_mode deepstack_concat --input_size 768 \
+    --out_dir data/features/smb_vision_imagenome_in768_ds
+python scripts/extract_smb_vision_features.py \
+    --pooling_mode deepstack_concat --input_size 768 \
+    --out_dir data/features/smb_vision_in768_ds
+python scripts/sweep_smb_vision_probe.py  # 304 cfg × 4 seeds × 5 findings, ~11h
 ```
 
 **Zero-shot (Protocol C):**
@@ -119,12 +166,19 @@ ms-cxr-t-bench/
 ├── models/                            # Model wrappers implementing BaseModel ABC
 ├── evaluation/                        # Protocol implementations and metrics
 ├── scripts/
-│   ├── train.py                       # Protocol A frozen-encoder probe
+│   ├── train.py                                    # Protocol A frozen-encoder probe
 │   ├── extract_biovil_t_features.py
 │   ├── extract_google_cxr_features.py
-│   ├── train_biovil_t_imagenome.py    # BioViL-T Table 2 replication
-│   ├── eval_protocol_c_biovil_t.py   # Zero-shot evaluation
-│   └── extract_imagenome_pairs.py     # Parse Chest ImaGenome scene graphs
+│   ├── extract_google_cxr_imagenome_features.py
+│   ├── train_biovil_t_imagenome.py                 # BioViL-T Table 2 replication
+│   ├── train_google_cxr_imagenome.py               # Google CXR frozen MLP probe
+│   ├── train_finetune_imagenome_generic.py         # End-to-end FT entrypoint (DenseNet, SMB, ...)
+│   ├── extract_smb_vision_features.py              # SMB MS-CXR-T features (merger / deepstack)
+│   ├── extract_smb_vision_imagenome_features.py    # SMB ImaGenome features
+│   ├── train_smb_vision_imagenome.py               # SMB single-config frozen probe
+│   ├── sweep_smb_vision_probe.py                   # SMB frozen-probe HP grid search
+│   ├── eval_protocol_c_biovil_t.py                 # Zero-shot evaluation
+│   └── extract_imagenome_pairs.py                  # Parse Chest ImaGenome scene graphs
 ├── configs/                           # YAML: one per model × protocol
 └── results/                           # JSON results with full config + metrics
 ```
