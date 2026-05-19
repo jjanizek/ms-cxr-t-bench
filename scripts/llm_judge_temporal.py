@@ -34,28 +34,37 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-LABEL_MAP = {"improving": 0, "stable": 1, "worsening": 2}
-LABEL_NAMES = ["improving", "stable", "worsening"]
+LABEL_MAP = {"improving": 0, "stable": 1, "worsening": 2, "none": 3}
+LABEL_NAMES = ["improving", "stable", "worsening", "none"]
+GT_LABEL_NAMES = ["improving", "stable", "worsening"]
 
 SYSTEM_PROMPT = """\
 You are an expert radiologist. You will be given a radiology report describing \
-chest X-ray findings, and a specific clinical finding to evaluate. Your task is \
-to determine whether that finding is IMPROVING, STABLE, or WORSENING based on \
-the report's temporal language.
+chest X-ray findings, and a specific clinical finding to evaluate. Extract two \
+things from the report:
 
-Rules:
-- If the report describes the finding as getting better, resolving, decreasing, \
-or improved compared to prior, classify as IMPROVING.
-- If the report describes the finding as unchanged, similar, stable, or \
-persistent without change, classify as STABLE.
-- If the report describes the finding as getting worse, increasing, new, \
-progressing, or worsened compared to prior, classify as WORSENING.
-- If the report does not mention the finding or temporal change at all, use \
-your best judgment based on available context. If truly ambiguous, classify \
-as STABLE.
+1. CLASSIFICATION of the finding's temporal progression:
+   - "improving": described as getting better, resolving, decreasing, or improved
+   - "stable": described as unchanged, similar, stable, or persistent without change
+   - "worsening": described as getting worse, increasing, new, progressing, or worsened
+   - "none": the report does NOT commit to a specific progression for this finding \
+(either does not mention it, or mentions it only descriptively with no temporal claim)
 
-Respond with EXACTLY this JSON format (no other text):
-{"classification": "improving" | "stable" | "worsening", "reasoning": "one sentence explanation"}
+2. MAKES_COMPARISON: whether the report makes ANY comparative claim about this \
+finding (or its absence) relative to a prior study. Comparative phrases include \
+"increased", "decreased", "new", "improved", "worsened", "compared to prior", \
+"interval change", "unchanged", "stable", "persistent", "previously seen", etc. \
+Return true if any such comparative language is used about this finding; false if \
+the report describes the finding only in static terms (e.g., "small left pleural \
+effusion" with no temporal qualifier) or does not mention the finding at all.
+
+Note: "stable" and "unchanged" ARE comparative claims (they assert no change \
+relative to prior). A purely descriptive statement with no temporal framing is NOT.
+
+Respond with EXACTLY this JSON (no other text):
+{"classification": "improving" | "stable" | "worsening" | "none", \
+"makes_comparison": true | false, \
+"reasoning": "one sentence explanation"}
 """
 
 USER_PROMPT_TEMPLATE = """\
@@ -113,17 +122,25 @@ def parse_response(text: str) -> dict:
         parsed = json.loads(text)
         cls = parsed.get("classification", "").lower().strip()
         reasoning = parsed.get("reasoning", "")
-        if cls in LABEL_MAP:
-            return {"classification": cls, "reasoning": reasoning, "raw": text}
+        mc = parsed.get("makes_comparison", None)
+        if isinstance(mc, str):
+            mc = mc.strip().lower() in ("true", "yes", "1")
+        if cls in LABEL_MAP and isinstance(mc, bool):
+            return {"classification": cls, "makes_comparison": mc,
+                    "reasoning": reasoning, "raw": text}
     except json.JSONDecodeError:
         pass
 
     # Fallback: look for keywords
     text_lower = text.lower()
+    cls_fb = "none"
     for label in ["improving", "worsening", "stable"]:
         if label in text_lower:
-            return {"classification": label, "reasoning": text, "raw": text}
-    return {"classification": "stable", "reasoning": f"PARSE_FAILED: {text}", "raw": text}
+            cls_fb = label
+            break
+    mc_fb = '"makes_comparison": true' in text_lower or '"makes_comparison":true' in text_lower
+    return {"classification": cls_fb, "makes_comparison": mc_fb,
+            "reasoning": f"PARSE_FAILED: {text}", "raw": text}
 
 
 def main():
@@ -167,7 +184,8 @@ def main():
             result = call_fn(SYSTEM_PROMPT, user_msg)
         except Exception as e:
             logger.warning("API error for %s: %s", rec.get("dicom_id"), e)
-            result = {"classification": "stable", "reasoning": f"API_ERROR: {e}", "raw": ""}
+            result = {"classification": "none", "makes_comparison": False,
+                      "reasoning": f"API_ERROR: {e}", "raw": ""}
             time.sleep(2)
 
         predictions.append({
@@ -177,7 +195,8 @@ def main():
             "ground_truth": rec["ground_truth"],
             "gt_label": rec["label"],
             "predicted": result["classification"],
-            "pred_label": LABEL_MAP.get(result["classification"], 1),
+            "pred_label": LABEL_MAP.get(result["classification"], 3),
+            "makes_comparison": bool(result["makes_comparison"]),
             "reasoning": result["reasoning"],
             "maira2_report": report_text,
         })
@@ -202,13 +221,17 @@ def main():
         y_pred = sub["pred_label"].values
         macro_acc = float(balanced_accuracy_score(y_true, y_pred))
         macro_f1 = float(f1_score(y_true, y_pred, average="macro", zero_division=0))
-        cm = confusion_matrix(y_true, y_pred, labels=[0, 1, 2]).tolist()
+        cm = confusion_matrix(y_true, y_pred, labels=[0, 1, 2, 3]).tolist()
+        comp_rate = float(sub["makes_comparison"].mean()) if "makes_comparison" in sub else None
+        none_rate = float((sub["pred_label"] == 3).mean())
         all_results.append({
             "finding": finding, "n": len(sub),
             "macro_acc": macro_acc, "macro_f1": macro_f1,
+            "comparison_rate": comp_rate, "none_rate": none_rate,
             "confusion_matrix": cm,
         })
-        logger.info("  %-20s  n=%d  macro_acc=%.3f  macro_f1=%.3f", finding, len(sub), macro_acc, macro_f1)
+        logger.info("  %-20s  n=%d  macro_acc=%.3f  macro_f1=%.3f  comp=%.2f  none=%.2f",
+                    finding, len(sub), macro_acc, macro_f1, comp_rate or 0.0, none_rate)
 
     # Average
     accs = [r["macro_acc"] for r in all_results]

@@ -1,0 +1,63 @@
+model:
+  name: microsoft/maira-2
+  torch_dtype: float16
+  device: cuda:0  # vision tower + LM + LoRA on one GPU
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  # PEFT matches by suffix; only language_model.* has these names
+  # (vision DINOv2 uses query/key/value; projector layers have no suffix)
+
+data:
+  prompts_dir: data/rl_prompts/seed42
+  images_root: data/raw/images
+  pair_single_ratio: 0.75  # 75% pair, 25% single per batch
+
+prompting:
+  prompt_mode: specific    # mirrors scripts/eval_maira2_mscxrt.py
+  technique: "AP portable chest radiograph."
+  indication: ""
+
+sampling:
+  group_size: 8           # G rollouts per prompt for GRPO advantage
+  max_new_tokens: 300
+  temperature: 0.9
+  top_p: 0.95
+
+reward:
+  alpha_label: 1.0        # weight on classification-match reward
+  beta_no_compare: 1.0    # weight on no-comparison reward (singles)
+  partial_credit: false   # if true: -0.5 for adjacent class, -1 for opposite
+
+judge:
+  api: openai
+  model: gpt-4.1-mini
+  concurrency: 20         # async semaphore size
+
+train:
+  num_steps: 2000
+  batch_prompts: 4        # B prompts per step → B*G rollouts
+  lr: 1.0e-5
+  weight_decay: 0.0
+  kl_coef: 0.05
+  grad_clip: 1.0
+  ppo_clip: 0.2           # only used if multi-epoch updates are enabled
+  ppo_epochs: 1           # 1 = pure on-policy (no clipping needed)
+  grad_checkpointing: true
+
+eval:
+  every_n_steps: 50
+  n_pair_eval: 100
+  n_single_eval: 50
+
+checkpoint:
+  dir: checkpoints/maira2_grpo_lora
+  save_every_n_steps: 50  # tied to eval
+  keep_last_n: 5
+
+logging:
+  out_dir: results/maira2_grpo_lora
+  log_every_n_steps: 1

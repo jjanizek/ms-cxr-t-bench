@@ -152,6 +152,13 @@ BioViL-T is a **temporal encoder** — it jointly encodes both images in a pair 
 - [ ] ImageNet DenseNet-121 — remaining seeds [123, 456, 789]
 - [ ] Our foundation model — Protocol A
 - [ ] Our foundation model — ImaGenome fine-tune → `train_finetune_imagenome_generic.py`
+- [x] MAIRA-2 GRPO+LoRA post-training on ImaGenome silver labels (1000 steps, seed 42):
+      MS-CXR-T val+test macro_acc 0.325 (baseline) → 0.352 (step_699) → 0.351 (step_999).
+      Headline +0.027 macro_acc, but **mode-collapsed**: step_999 predicts "stable" 97% of the
+      time and gets 6/178 real-change cases right vs baseline 27/178. See
+      `docs/imagenome_rl_results.md`. Reward shape with `partial_credit=true` made "always
+      stable" the low-risk strategy — next iteration drops partial credit and stratifies
+      batches by gt class.
 
 ### Task 2: Medical Device Classification
 - [ ] Radiologist labeling in progress (~1,600 images)

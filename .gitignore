@@ -26,6 +26,15 @@ logs/
 # Chest ImaGenome derived pairs (regenerate with scripts/extract_imagenome_pairs.py)
 data/imagenome_pairs/
 
+# RL prompt pools (regenerate with scripts/build_imagenome_rl_prompts.py / build_rl_prompts.py)
+data/rl_prompts/
+
+# MAIRA-2 generated reports (regenerate with scripts/eval_maira2_mscxrt.py)
+data/maira2_reports/
+
+# Throwaway eval configs (ad-hoc files written by harness)
+configs/_eval_*.yaml
+
 # Jupyter
 .ipynb_checkpoints/
 notebooks/.ipynb_checkpoints/

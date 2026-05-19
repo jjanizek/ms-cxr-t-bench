@@ -1,0 +1,62 @@
+model:
+  name: microsoft/maira-2
+  torch_dtype: float16
+  device: cuda:1
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+
+data:
+  prompts_dir: data/rl_prompts/seed42
+  images_root: data/raw/images
+  pair_single_ratio: 1.0    # pure pair batches; singles dropped (no headroom)
+
+prompting:
+  prompt_mode: specific
+  technique: "AP portable chest radiograph."
+  indication: ""
+
+sampling:
+  group_size: 4             # G=8 OOMs without per-chunk backward; v1 confirmed G=4 fits
+  max_new_tokens: 150
+  temperature: 0.9
+  top_p: 0.95
+
+reward:
+  alpha_label: 1.0
+  beta_no_compare: 0.0      # drop singles reward — base already at 0.96
+  partial_credit: true      # 3-value rewards (+1, -0.5, -1) for finer signal
+
+judge:
+  api: openai
+  model: gpt-4.1-mini
+  concurrency: 16
+
+train:
+  num_steps: 200
+  batch_prompts: 2
+  lr: 5.0e-6                # half of v1/v2 to slow policy drift
+  weight_decay: 0.0
+  kl_coef: 0.1              # 2x v1/v2 for stronger reference anchor
+  grad_clip: 1.0
+  ppo_clip: 0.2
+  ppo_epochs: 1
+  grad_checkpointing: true
+  logp_chunk_size: 2
+
+eval:
+  every_n_steps: 50
+  n_pair_eval: 50
+  n_single_eval: 25         # kept for no-comp tracking (cheap)
+
+checkpoint:
+  dir: checkpoints/maira2_grpo_lora_dev_v3
+  save_every_n_steps: 50
+  keep_last_n: 4
+
+logging:
+  out_dir: results/maira2_grpo_lora_dev_v3
+  log_every_n_steps: 1

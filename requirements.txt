@@ -8,6 +8,12 @@ PyYAML>=6.0
 Pillow>=9.0
 tqdm>=4.65
 
+# MAIRA-2 GRPO post-training (scripts/rl_maira2_temporal.py)
+transformers>=4.46
+peft>=0.10
+openai>=1.40       # async judge client
+anthropic>=0.34    # optional alternate judge
+
 # BioViL / BioViL-T (Microsoft)
 hi-ml-multimodal>=0.2
 

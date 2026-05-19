@@ -42,8 +42,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-LABEL_MAP = {"improving": 0, "stable": 1, "worsening": 2}
-LABEL_NAMES = ["improving", "stable", "worsening"]
+LABEL_MAP = {"improving": 0, "stable": 1, "worsening": 2, "none": 3}
+LABEL_NAMES = ["improving", "stable", "worsening", "none"]
+BOOL_MAP = {"true": True, "false": False, "yes": True, "no": False,
+            "1": True, "0": False, "t": True, "f": False}
 
 
 def cmd_export(args):
@@ -62,11 +64,18 @@ def cmd_export(args):
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create annotation sheet (preserve ground_truth for reference during labeling)
+    # Create annotation sheet (preserve ground_truth for reference during labeling).
+    # Two human columns to fill in:
+    #   - human_label: improving | stable | worsening | none
+    #   - human_makes_comparison: true | false  (does the report make ANY comparative
+    #     claim about this finding relative to a prior study?)
     cols = ["dicom_id", "previous_dicom_id", "finding", "ground_truth",
-            "maira2_report", "predicted"]
+            "maira2_report", "predicted", "makes_comparison"]
     sheet = sampled[[c for c in cols if c in sampled.columns]].copy()
-    sheet["human_label"] = ""  # blank column for annotator
+    if "makes_comparison" in sheet.columns:
+        sheet = sheet.rename(columns={"makes_comparison": "judge_makes_comparison"})
+    sheet["human_label"] = ""
+    sheet["human_makes_comparison"] = ""
     sheet["notes"] = ""
 
     out_path = out_dir / "annotation_sheet.csv"
@@ -76,7 +85,9 @@ def cmd_export(args):
         out_path, len(sheet),
     )
     logger.info("Columns: dicom_id, previous_dicom_id, finding, maira2_report, "
-                "predicted (LLM judge), human_label (FILL THIS IN), notes")
+                "predicted (LLM judge classification), judge_makes_comparison, "
+                "human_label (FILL: improving|stable|worsening|none), "
+                "human_makes_comparison (FILL: true|false), notes")
     logger.info(
         "Finding distribution:\n%s",
         sheet["finding"].value_counts().to_string(),
@@ -86,9 +97,24 @@ def cmd_export(args):
 def cmd_analyze(args):
     """Compare human vs LLM labels, compute agreement, generate plots."""
     df = pd.read_csv(args.annotated)
-    df = df[df["human_label"].notna() & (df["human_label"] != "")].copy()
+    df = df[df["human_label"].notna() & (df["human_label"].astype(str).str.strip() != "")].copy()
     df["human_label"] = df["human_label"].str.lower().str.strip()
     df["predicted"] = df["predicted"].str.lower().str.strip()
+
+    # makes_comparison agreement (separate axis)
+    if "human_makes_comparison" in df.columns and "judge_makes_comparison" in df.columns:
+        mc = df[df["human_makes_comparison"].astype(str).str.strip() != ""].copy()
+        mc["human_mc"] = mc["human_makes_comparison"].astype(str).str.lower().str.strip().map(BOOL_MAP)
+        mc["judge_mc"] = mc["judge_makes_comparison"].astype(str).str.lower().str.strip().map(
+            lambda v: BOOL_MAP.get(v, None))
+        mc = mc[mc["human_mc"].notna() & mc["judge_mc"].notna()]
+        if len(mc):
+            mc_acc = float((mc["human_mc"] == mc["judge_mc"]).mean())
+            mc_kappa = float(cohen_kappa_score(mc["human_mc"].astype(int),
+                                                mc["judge_mc"].astype(int)))
+            logger.info("=== makes_comparison agreement (n=%d) ===", len(mc))
+            logger.info("  Raw agreement:  %.1f%%", 100 * mc_acc)
+            logger.info("  Cohen's kappa:  %.3f", mc_kappa)
 
     valid = df[df["human_label"].isin(LABEL_MAP) & df["predicted"].isin(LABEL_MAP)].copy()
     if len(valid) < len(df):
@@ -105,7 +131,7 @@ def cmd_analyze(args):
     acc = float(np.mean(y_human == y_llm))
     bal_acc = float(balanced_accuracy_score(y_human, y_llm))
     kappa = float(cohen_kappa_score(y_human, y_llm))
-    cm = confusion_matrix(y_human, y_llm, labels=[0, 1, 2])
+    cm = confusion_matrix(y_human, y_llm, labels=list(range(len(LABEL_NAMES))))
 
     logger.info("\n=== LLM Judge Validation (n=%d) ===", n)
     logger.info("  Raw agreement:      %.1f%%", 100 * acc)
