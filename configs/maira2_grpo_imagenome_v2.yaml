@@ -1,0 +1,76 @@
+# v2: targets the mode-collapse-to-stable failure mode in v1.
+#  - partial_credit OFF (binary +1/-1 — removes the asymmetric penalty that
+#    made "always stable" the low-risk strategy)
+#  - stratify_by_gt_progression ON (equal expected airtime per
+#    (finding, gt_class) bucket — neutralises the 43% stable prior)
+#  - in-training eval now reports per-gt-class accuracy so collapse is
+#    visible at step 100 instead of step 1000.
+
+model:
+  name: microsoft/maira-2
+  torch_dtype: float16
+  device: cuda:1
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+
+vision_lora:
+  enabled: false           # still TODO — PEFT+Llava grad-flow issue
+  last_n_layers: 6
+
+data:
+  prompts_dir: data/rl_prompts/imagenome
+  images_root: /data/mimic-cxr-jpg
+  pair_single_ratio: 1.0
+  stratify_by_finding: true
+  stratify_by_gt_progression: true   # NEW vs v1
+
+prompting:
+  prompt_mode: specific
+  technique: "AP portable chest radiograph."
+  indication: ""
+
+sampling:
+  group_size: 4
+  max_new_tokens: 150
+  temperature: 0.9
+  top_p: 0.95
+
+reward:
+  alpha_label: 1.0
+  beta_no_compare: 0.0
+  partial_credit: false    # v1 had this true → mode collapse to "stable"
+
+judge:
+  api: openai
+  model: gpt-4.1-mini
+  concurrency: 32
+
+train:
+  num_steps: 1000
+  batch_prompts: 2
+  lr: 5.0e-6
+  weight_decay: 0.0
+  kl_coef: 0.1
+  grad_clip: 1.0
+  ppo_clip: 0.2
+  ppo_epochs: 1
+  grad_checkpointing: true
+  logp_chunk_size: 2
+
+eval:
+  every_n_steps: 100
+  n_pair_eval: 100
+  n_single_eval: 0
+
+checkpoint:
+  dir: checkpoints/maira2_grpo_imagenome_v2
+  save_every_n_steps: 100
+  keep_last_n: 10           # keep more so we can pick best, not just last
+
+logging:
+  out_dir: results/maira2_grpo_imagenome_v2
+  log_every_n_steps: 1

@@ -101,6 +101,33 @@ Respond with EXACTLY this JSON (no other text):
 "reasoning": "one sentence explanation"}
 """
 
+# 3-class judge prompt (no "none" escape). Ambiguous/non-committal reports default
+# to "stable". Used for reward when the 4-class judge enables "produce a vague
+# report" as a low-KL low-loss policy attractor (see v2 failure mode).
+JUDGE_SYSTEM_PROMPT_3CLASS = """\
+You are an expert radiologist. You will be given a radiology report describing \
+chest X-ray findings, and a specific clinical finding to evaluate. Your task is \
+to determine whether that finding is IMPROVING, STABLE, or WORSENING based on \
+the report's temporal language.
+
+Rules:
+- If the report describes the finding as getting better, resolving, decreasing, \
+or improved compared to prior, classify as IMPROVING.
+- If the report describes the finding as unchanged, similar, stable, or \
+persistent without change, classify as STABLE.
+- If the report describes the finding as getting worse, increasing, new, \
+progressing, or worsened compared to prior, classify as WORSENING.
+- If the report does not mention the finding or temporal change at all, use \
+your best judgment based on available context. If truly ambiguous, classify \
+as STABLE.
+
+Respond with EXACTLY this JSON (no other text — `makes_comparison` should \
+mirror whether the report uses any temporal qualifier about this finding):
+{"classification": "improving" | "stable" | "worsening", \
+"makes_comparison": true | false, \
+"reasoning": "one sentence explanation"}
+"""
+
 JUDGE_USER_TEMPLATE = """\
 Report:
 {report}
@@ -141,11 +168,12 @@ class AsyncJudge:
     `asyncio.run` creates a new loop each invocation — reusing the semaphore
     across asyncio.run calls raises "bound to a different event loop".
     """
-    def __init__(self, model: str, concurrency: int = 20):
+    def __init__(self, model: str, concurrency: int = 20, system_prompt: str = None):
         from openai import AsyncOpenAI
         self.client = AsyncOpenAI()
         self.model = model
         self.concurrency = concurrency
+        self.system_prompt = system_prompt or JUDGE_SYSTEM_PROMPT
 
     async def grade_one(self, sem: asyncio.Semaphore,
                          report: str, finding: str) -> dict:
@@ -155,7 +183,7 @@ class AsyncJudge:
             try:
                 resp = await self.client.chat.completions.create(
                     model=self.model,
-                    messages=[{"role": "system", "content": JUDGE_SYSTEM_PROMPT},
+                    messages=[{"role": "system", "content": self.system_prompt},
                               {"role": "user", "content": user}],
                     temperature=0, max_tokens=150,
                 )
@@ -176,21 +204,34 @@ class AsyncJudge:
 
 def compute_reward(prompt_type: str, gt: str | None,
                    judge_out: dict, alpha: float, beta: float,
-                   partial_credit: bool = False) -> tuple[float, dict]:
+                   partial_credit: bool = False,
+                   change_weight: float = 1.0,
+                   stable_weight: float = 1.0,
+                   wrong_penalty: float = 1.0) -> tuple[float, dict]:
+    """Per-rollout reward.
+
+    Class-weighted rewards (v4) make correct change-detection pay more than
+    correct stable: with change_weight=2, stable_weight=1, wrong_penalty=1
+    the expected reward of "always stable" under gt-stratified sampling is
+    1/3 * (+1) + 2/3 * (-1) = -0.33, while a policy that correctly identifies
+    changes 50% of the time and correctly says stable 50% of the time gets
+    1/3 * 0.5 * (+1) + 1/3 * 0.5 * (-1) + 2/3 * 0.5 * (+2) + 2/3 * 0.5 * (-1)
+    = +0.17 — beating the stable hedge.
+    """
     cls = judge_out["classification"]
     mc = judge_out["makes_comparison"]
 
     if prompt_type == "pair":
         if cls == gt:
-            r_label = 1.0
+            r_label = stable_weight if gt == "stable" else change_weight
         elif partial_credit:
             order = ["improving", "stable", "worsening"]
             if cls in order and gt in order and abs(order.index(cls) - order.index(gt)) == 1:
-                r_label = -0.5
+                r_label = -0.5 * wrong_penalty
             else:
-                r_label = -1.0
+                r_label = -1.0 * wrong_penalty
         else:
-            r_label = -1.0
+            r_label = -1.0 * wrong_penalty
         r_no_compare = 0.0
     else:  # single
         r_label = 0.0
@@ -506,12 +547,32 @@ def quick_eval(model, processor, prompts: list[dict], cfg: dict,
         if jo["classification"] == p["gt_progression"]
     )
 
+    # Per-gt-class breakdown (greedy) — surfaces mode collapse to "stable" early.
+    per_gt = {"improving": [0, 0], "stable": [0, 0], "worsening": [0, 0]}
+    pred_dist = {"improving": 0, "stable": 0, "worsening": 0, "none": 0}
+    for (p, _), jo in zip(reports, judge_outs):
+        if p["prompt_type"] != "pair":
+            continue
+        gt = p["gt_progression"]
+        if gt in per_gt:
+            per_gt[gt][1] += 1
+            if jo["classification"] == gt:
+                per_gt[gt][0] += 1
+        pred_dist[jo["classification"]] = pred_dist.get(jo["classification"], 0) + 1
+
+    per_gt_acc = {k: (c / n if n else 0.0) for k, (c, n) in per_gt.items()}
+    n_pair_total = sum(n for _, n in per_gt.values())
+    pred_dist_frac = {k: v / max(n_pair_total, 1) for k, v in pred_dist.items()}
+
     return {
         "pair_acc_greedy": pair_correct / max(pair_total, 1),
         "pair_acc_sampled": sampled_pair_correct / max(len(sampled_reports), 1),
         "pair_n": pair_total,
         "single_no_comparison_rate": single_no_comp / max(single_total, 1),
         "single_n": single_total,
+        "per_gt_acc": per_gt_acc,
+        "per_gt_n": {k: n for k, (_, n) in per_gt.items()},
+        "pred_dist": pred_dist_frac,
     }
 
 
@@ -572,8 +633,12 @@ def main():
     optimizer = torch.optim.AdamW(trainable, lr=cfg["train"]["lr"],
                                    weight_decay=cfg["train"]["weight_decay"])
 
+    judge_prompt_mode = cfg["judge"].get("prompt_mode", "4class")  # "4class" | "3class"
+    judge_sys_prompt = JUDGE_SYSTEM_PROMPT_3CLASS if judge_prompt_mode == "3class" else JUDGE_SYSTEM_PROMPT
+    logger.info("Judge prompt mode: %s", judge_prompt_mode)
     judge = AsyncJudge(model=cfg["judge"]["model"],
-                       concurrency=cfg["judge"]["concurrency"])
+                       concurrency=cfg["judge"]["concurrency"],
+                       system_prompt=judge_sys_prompt)
 
     rng = np.random.default_rng(0)
     B = cfg["train"]["batch_prompts"]
@@ -584,17 +649,35 @@ def main():
     alpha = cfg["reward"]["alpha_label"]
     beta = cfg["reward"]["beta_no_compare"]
     partial = cfg["reward"]["partial_credit"]
+    change_weight = float(cfg["reward"].get("change_weight", 1.0))
+    stable_weight = float(cfg["reward"].get("stable_weight", 1.0))
+    wrong_penalty = float(cfg["reward"].get("wrong_penalty", 1.0))
     stratify_by_finding = bool(cfg["data"].get("stratify_by_finding", False))
 
-    # Per-prompt sampling weights — when stratify_by_finding is on, weight each
-    # prompt by 1/finding_count so every finding has equal expected airtime
-    # regardless of pool size (ImaGenome pleural_effusion has ~6× consolidation).
+    # Per-prompt sampling weights. When stratify_by_finding is on we weight by
+    # 1/finding_count; when stratify_by_gt_progression is also on we additionally
+    # weight by 1/gt_count within that finding so each (finding, gt_class) bucket
+    # has equal expected airtime. This is critical when gt is imbalanced
+    # (ImaGenome stable=43%, worsening=38%, improving=18%) — uniform sampling
+    # made "always stable" the best policy under partial_credit reward in v1.
+    stratify_by_gt = bool(cfg["data"].get("stratify_by_gt_progression", False))
     def _weights(pool):
-        if not pool or not stratify_by_finding:
+        if not pool or not (stratify_by_finding or stratify_by_gt):
             return None
         from collections import Counter
-        counts = Counter(p["finding"] for p in pool)
-        w = np.array([1.0 / counts[p["finding"]] for p in pool], dtype=np.float64)
+        finding_counts = Counter(p["finding"] for p in pool) if stratify_by_finding else None
+        gt_counts_per_finding = {}
+        if stratify_by_gt:
+            for p in pool:
+                gt_counts_per_finding.setdefault(p["finding"], Counter())[p.get("gt_progression")] += 1
+        w = np.empty(len(pool), dtype=np.float64)
+        for i, p in enumerate(pool):
+            wi = 1.0
+            if stratify_by_finding:
+                wi /= finding_counts[p["finding"]]
+            if stratify_by_gt and p.get("gt_progression") is not None:
+                wi /= gt_counts_per_finding[p["finding"]][p["gt_progression"]]
+            w[i] = wi
         return w / w.sum()
     pair_weights = _weights(train_pair)
     single_weights = _weights(train_single)
@@ -653,6 +736,9 @@ def main():
                 rew, comp = compute_reward(
                     r["prompt"]["prompt_type"], r["prompt"]["gt_progression"],
                     jo, alpha, beta, partial,
+                    change_weight=change_weight,
+                    stable_weight=stable_weight,
+                    wrong_penalty=wrong_penalty,
                 )
                 rewards.append(rew); comps.append(comp)
             r["rewards"] = np.array(rewards, dtype=np.float32)
@@ -776,11 +862,14 @@ def main():
                     device=device,
                 )
                 metrics["step"] = step
+                gt = metrics.get("per_gt_acc", {})
+                pd_ = metrics.get("pred_dist", {})
                 logger.info(
-                    "EVAL step=%d  pair_acc_greedy=%.3f  pair_acc_sampled=%.3f  "
-                    "single_no_comp=%.3f",
+                    "EVAL step=%d  greedy=%.3f sampled=%.3f  "
+                    "imp=%.2f stab=%.2f wors=%.2f  pred_stab=%.2f",
                     step, metrics["pair_acc_greedy"], metrics["pair_acc_sampled"],
-                    metrics["single_no_comparison_rate"],
+                    gt.get("improving", 0), gt.get("stable", 0), gt.get("worsening", 0),
+                    pd_.get("stable", 0),
                 )
                 with open(out_dir / f"eval_{run_id}.jsonl", "a") as f:
                     f.write(json.dumps(metrics) + "\n")
