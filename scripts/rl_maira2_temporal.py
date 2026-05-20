@@ -618,6 +618,16 @@ def main():
     train_pair = train_pool["pair"]
     train_single = train_pool["single"]
     val_all = val_pool["pair"] + val_pool["single"]
+    # Optional: restrict training pair prompts to a subset of gt_progression
+    # classes. Used by v5 to drop gt=stable cases so the Schelling point
+    # vanishes from the gradient landscape (mode-collapse to "stable" was the
+    # dominant failure across v1–v4 with stable-inclusive training).
+    train_classes = cfg["data"].get("train_classes")
+    if train_classes:
+        before = len(train_pair)
+        train_pair = [p for p in train_pair if p.get("gt_progression") in train_classes]
+        logger.info("Filtered train pair by gt_progression %s: %d → %d",
+                    train_classes, before, len(train_pair))
     logger.info("Train: pair=%d single=%d  | Val: pair=%d single=%d",
                 len(train_pair), len(train_single),
                 len(val_pool["pair"]), len(val_pool["single"]))

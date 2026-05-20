@@ -1,0 +1,89 @@
+# v5: drop stable-gt training data entirely.
+#
+# v4 (change_weight=2, stable_weight=1) made the asymmetric reward larger but
+# the policy still drifted toward 89% pred=stable at step 199. The Schelling
+# point survives any reward shaping as long as "stable" appears in training:
+# the model learns "stable" is a high-reward action because it's correct ~33%
+# of the time under gt-stratified batches, and the +2 for changes never fires
+# because the model rarely commits to a change at sample-time.
+#
+# v5 removes the attractor: training only sees pair prompts where gt is
+# improving or worsening. The model is forced to commit to a direction every
+# rollout. Stable-gt cases are never seen during RL — we rely on the base
+# policy to handle them at eval time (baseline MAIRA-2 already over-predicts
+# stable, so dropping stable training shouldn't hurt stable-test accuracy
+# much). Eval is unchanged (still mixed 3-class on a held-out 100-pair set).
+
+model:
+  name: microsoft/maira-2
+  torch_dtype: float16
+  device: cuda:1
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+
+vision_lora:
+  enabled: false
+  last_n_layers: 6
+
+data:
+  prompts_dir: data/rl_prompts/imagenome
+  images_root: /data/mimic-cxr-jpg
+  pair_single_ratio: 1.0
+  stratify_by_finding: true
+  stratify_by_gt_progression: true
+  train_classes: [improving, worsening]   # NEW: drop stable-gt prompts
+
+prompting:
+  prompt_mode: specific
+  technique: "AP portable chest radiograph."
+  indication: ""
+
+sampling:
+  group_size: 4
+  max_new_tokens: 150
+  temperature: 0.9
+  top_p: 0.95
+
+reward:
+  alpha_label: 1.0
+  beta_no_compare: 0.0
+  partial_credit: false
+  change_weight: 1.0          # back to symmetric — class weights don't matter
+  stable_weight: 1.0          # when stable is never in the train batch
+  wrong_penalty: 1.0
+
+judge:
+  api: openai
+  model: gpt-4.1-mini
+  concurrency: 32
+  prompt_mode: 3class
+
+train:
+  num_steps: 1000
+  batch_prompts: 2
+  lr: 5.0e-6
+  weight_decay: 0.0
+  kl_coef: 0.1
+  grad_clip: 1.0
+  ppo_clip: 0.2
+  ppo_epochs: 1
+  grad_checkpointing: true
+  logp_chunk_size: 2
+
+eval:
+  every_n_steps: 100
+  n_pair_eval: 100
+  n_single_eval: 0
+
+checkpoint:
+  dir: checkpoints/maira2_grpo_imagenome_v5
+  save_every_n_steps: 100
+  keep_last_n: 10
+
+logging:
+  out_dir: results/maira2_grpo_imagenome_v5
+  log_every_n_steps: 1

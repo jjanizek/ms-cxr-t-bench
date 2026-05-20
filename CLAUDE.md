@@ -159,6 +159,16 @@ BioViL-T is a **temporal encoder** — it jointly encodes both images in a pair 
       `docs/imagenome_rl_results.md`. Reward shape with `partial_credit=true` made "always
       stable" the low-risk strategy — next iteration drops partial credit and stratifies
       batches by gt class.
+- [x] MAIRA-2 RL ablation v2–v5 (2026-05-19): v2 collapses to "none" (judge escape),
+      v3/v4 stay biased toward "stable" despite gt-stratification + class-weighted reward.
+      **v5 (drop stable-gt prompts from training)** breaks the Schelling point:
+      **MS-CXR-T macro_acc 0.360 at step 99** with balanced predictions (9/75/16),
+      beating v1's collapsed best (0.351) by +0.9pp without mode collapse. Past step ~200
+      v5 starts overfitting to ImaGenome silver-label conventions and regresses on
+      MS-CXR-T (step 399 → 0.311) — early stopping on the target distribution is required.
+      Frozen-vision LoRA appears to cap at ~0.36 macro_acc; bridging to BioViL-T 0.612
+      likely needs vision-encoder unfreezing or SFT-before-RL.
+      See `docs/imagenome_rl_results.md` (second iteration section).
 
 ### Task 2: Medical Device Classification
 - [ ] Radiologist labeling in progress (~1,600 images)

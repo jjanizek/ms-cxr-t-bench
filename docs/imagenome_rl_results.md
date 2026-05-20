@@ -107,3 +107,77 @@ The trained checkpoints learned a fluent comparison template ("Since the prior s
 - `scripts/plot_rl_curves.py` — training curve diagnostics
 - Checkpoints under `checkpoints/maira2_grpo_imagenome/step_{599,699,799,899,999}` (last 5 retained)
 - Predictions and summaries under `results/maira2_og_metric_eval/`
+
+---
+
+# Second iteration: v2 / v3 / v4 / v5 (2026-05-19)
+
+After v1's "always stable" collapse, four follow-up configurations attempted to
+break the Schelling point. Final headline on MS-CXR-T val+test (315 pairs,
+3-class judge, balanced accuracy averaged across 5 findings):
+
+| Run                             | macro_acc | Pred dist (imp / stab / wors)  | Notes |
+|---------------------------------|-----------|--------------------------------|-------|
+| Baseline (no LoRA)              | 0.325     | —                              | |
+| v1 step 999 (partial_credit)    | 0.351     | 1.5 / 97 / 1.5                 | mode collapse |
+| v2 step 99                      | killed early | imp 32 / stable 4 / **none 64** | collapse to "none" |
+| v3 step 99 (3-class judge)      | 0.302 (in-train) | 6 / 79 / 15            | back to stable |
+| v4 step 199 (cw=2, sw=1)        | 0.271 (in-train) | 3 / 89 / 8             | stable bias intensified |
+| **v5 step 99** (change-only)    | **0.360**| 9 / 75 / 16                    | **best** |
+| v5 step 199                     | 0.356     | 15 / 62 / 23                   | |
+| v5 step 299                     | 0.356     | 14 / 55 / 31                   | |
+| v5 step 399                     | 0.311     | 21 / 44 / 35                   | regression on MS-CXR-T |
+| BioViL-T (Bannur 2023, Table 2) | 0.612     | —                              | end-to-end on ImaGenome |
+
+## What worked
+
+**v5 — drop stable-gt prompts from training** (`train_classes: [improving, worsening]`).
+Removed the attractor entirely from the gradient landscape. Result: best RL
+macro_acc (0.360, +3.5pp over baseline, +0.9pp over v1's collapsed best) with
+a well-balanced prediction distribution rather than degenerate one-class
+collapse.
+
+## What didn't work
+
+- **v2 (binary reward, 4-class judge)**: model discovered "none" classification
+  as a low-KL escape valve. Predicted "none" 64% at step 99.
+- **v3 (3-class judge for reward)**: closed the "none" valve but didn't shift
+  the stable Schelling point. R plateaued at −0.30 (matches expected reward
+  of "always stable" under stratified gt: 1/3·(+1) + 2/3·(−1) = −1/3).
+- **v4 (class-weighted reward, change=2, stable=1)**: training R improved
+  slightly but greedy eval got *worse* — stable predictions climbed from 75% →
+  89% over 200 steps. Asymmetric reward wasn't enough to overcome the prior
+  toward "stable" reports.
+
+## The training/eval distribution gap
+
+In-training eval (ImaGenome val) showed v5 step 399 jumping to macro_acc 0.362
+with well-balanced predictions (21/44/35). MS-CXR-T eval *dropped* to 0.311.
+The model is over-fitting to ImaGenome silver-label conventions that don't
+transfer to MS-CXR-T's human-rated labels. Implication: **early stopping on
+the actual target distribution matters**; the in-training proxy can mislead.
+
+## Lessons
+
+1. **Mode-collapse defenses go in a strict order**:
+   reward shape ⟶ training data composition ⟶ stratified sampling.
+   v3/v4 tried (1) without doing (2); only v5 (drop stable-gt) actually moved
+   the policy off the prior.
+2. **The in-training eval is a proxy, not the target.** Always evaluate on
+   MS-CXR-T (the real eval set) at every checkpoint, not just the
+   training-distribution val.
+3. **Greedy eval lags sampled eval by ~100 steps**: under sampling the model
+   commits to a change before greedy decoding's argmax shifts. v5 step 99
+   already had useful policy mass on changes that argmax didn't surface yet.
+4. **Frozen-vision LoRA caps at ~0.36 macro_acc**: this is roughly halfway from
+   baseline (0.325) to BioViL-T (0.612). Further gains likely require either
+   (a) unfreezing the vision tower (PEFT+Llava integration TODO), or
+   (b) SFT on silver labels before RL to teach the response format and base
+   rates more directly.
+
+## Files
+
+Configs: `configs/maira2_grpo_imagenome_v{2,3,4,5}.yaml`
+Best adapter: `checkpoints/maira2_grpo_imagenome_v5/step_000099/`
+MS-CXR-T eval summaries: `results/maira2_og_metric_eval/summary_v5_step{099,199,299,399}_*.json`
+Training logs: `results/maira2_grpo_imagenome_v5/run_*.jsonl`
