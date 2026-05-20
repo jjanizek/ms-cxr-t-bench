@@ -1,0 +1,90 @@
+# v6a: ablation — pure capacity bump from v5, NO projector targets.
+# Pairs with v6b (r=16 + projector) to disentangle:
+#   v5  (r=16, no projector)         → 0.360
+#   v6  (r=32, + projector)          → 0.383
+#   v6a (r=32, no projector) ← this  → ?
+#   v6b (r=16, + projector)          → ?
+# If v6a ≈ v6, rank is the lever and projector adds nothing.
+# If v6a ≈ v5, capacity alone didn't help — projector is the lever.
+# If v6a midway, both contribute.
+
+model:
+  name: microsoft/maira-2
+  torch_dtype: float16
+  device: cuda:1               # GPU 0 has 500MB less memory and OOMs; queue after v6b
+
+lora:
+  r: 32
+  alpha: 64
+  dropout: 0.05
+  target_modules:               # v5 targets only (no projector)
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+vision_lora:
+  enabled: false
+  last_n_layers: 6
+
+data:
+  prompts_dir: data/rl_prompts/imagenome
+  images_root: /data/mimic-cxr-jpg
+  pair_single_ratio: 1.0
+  stratify_by_finding: true
+  stratify_by_gt_progression: true
+  train_classes: [improving, worsening]
+
+prompting:
+  prompt_mode: specific
+  technique: "AP portable chest radiograph."
+  indication: ""
+
+sampling:
+  group_size: 4
+  max_new_tokens: 150
+  temperature: 0.9
+  top_p: 0.95
+
+reward:
+  alpha_label: 1.0
+  beta_no_compare: 0.0
+  partial_credit: false
+  change_weight: 1.0
+  stable_weight: 1.0
+  wrong_penalty: 1.0
+
+judge:
+  api: openai
+  model: gpt-4.1-mini
+  concurrency: 32
+  prompt_mode: 3class
+
+train:
+  num_steps: 150                # only need to bracket the step-99 peak
+  batch_prompts: 2
+  lr: 5.0e-6
+  weight_decay: 0.0
+  kl_coef: 0.1
+  grad_clip: 1.0
+  ppo_clip: 0.2
+  ppo_epochs: 1
+  grad_checkpointing: true
+  logp_chunk_size: 2
+
+eval:
+  every_n_steps: 50
+  n_pair_eval: 100
+  n_single_eval: 0
+
+checkpoint:
+  dir: checkpoints/maira2_grpo_imagenome_v6a
+  save_every_n_steps: 50
+  keep_last_n: 5
+
+logging:
+  out_dir: results/maira2_grpo_imagenome_v6a
+  log_every_n_steps: 1

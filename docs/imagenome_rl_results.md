@@ -264,3 +264,97 @@ Config: `configs/maira2_grpo_imagenome_v6.yaml` (r=32 + projector + change-only)
 Best adapter: `checkpoints/maira2_grpo_imagenome_v6/step_000099/`
 MS-CXR-T evals: `results/maira2_og_metric_eval/summary_v6_step{049,099,149,199}_*.json`
 Training log: `results/maira2_grpo_imagenome_v6/run_*.jsonl`
+
+---
+
+# Fourth iteration: v6a / v6b ablation — disentangling v6's gain (2026-05-20)
+
+v6 changed two things from v5 at once (rank 16→32, +projector targets) and
+landed at 0.383 vs v5's 0.360. v6a and v6b split those two changes apart.
+
+## 2×2 design
+
+| Config              | rank | + projector? | step 99 MS-CXR-T | Best (steps 49–149) |
+|---------------------|------|--------------|------------------|---------------------|
+| Baseline            | —    | —            | —                | 0.325               |
+| v5                  | 16   | no           | 0.360            | 0.360               |
+| **v6a**             | 32   | no           | 0.321            | 0.341 (step 149)    |
+| **v6b**             | 16   | yes          | 0.338            | 0.348 (step 149)    |
+| v6                  | 32   | yes          | **0.383**        | **0.383**           |
+
+## What this says
+
+Neither change alone reproduces v6's gain. Capacity-only (v6a) actually drops
+*below* v5 at step 99 (the model finds a worse local optimum without new
+features to translate). Projector-only (v6b) only nudges marginally up.
+**The two together** unlock 0.383 — a +0.058 jump over baseline vs +0.016 (v6a)
+and +0.023 (v6b) individually. Roughly additive (sum 0.039) plus an extra
+~0.019 of synergy.
+
+The mechanistic read: projector LoRA at any rank gives the LM new
+vision-derived features to consume, but at r=16 the LM doesn't have the
+plasticity to actually adapt to them. r=32 LM with no projector is just
+overfitting to the same frozen rad-DINO distribution, faster. The
+combination — more LM plasticity *and* a moving vision-to-LM bridge — is
+what shifts the model into a regime where it can describe temporal change
+better.
+
+Single-seed numbers, so error bars are loose. But the four-cell pattern is
+clean enough to act on.
+
+## Practical implication
+
+The bottleneck is genuinely the vision-side bridge, not LM capacity alone.
+Pushing further means either:
+1. **Bigger projector adapters** (more rank, more targets) — diminishing
+   returns expected once projector saturates.
+2. **Swap rad-DINO for a temporally-aware encoder (BioViL-T)** — gives the
+   projector richer features to translate. Likely the highest-leverage next
+   move. See task #30 (v7).
+
+## Files
+Configs: `configs/maira2_grpo_imagenome_v6a.yaml`, `configs/maira2_grpo_imagenome_v6b.yaml`
+Eval summaries: `results/maira2_og_metric_eval/summary_v6{a,b}_step*_*.json`
+
+---
+
+# Judge ceiling check: original radiologist reports (2026-05-20)
+
+To sanity-check the OG judge, we reconstructed full MIMIC-CXR reports for
+all 315 MS-CXR-T val+test pairs (via the Chest ImaGenome processed-sentences
+dump, indexed by subject_id + rad_id) and graded them with the same 3-class
+judge we use to score model outputs.
+
+| n   | judge↔MS-CXR-T label macro_acc | per-finding (cons/edema/eff/pneum/ptx)   |
+|-----|--------------------------------|------------------------------------------|
+| 315 | **0.980**                      | 1.00 / 0.98 / 0.96 / 0.96 / 1.00         |
+
+Only 7/315 disagreements, all on genuinely ambiguous reports ("stable since
+X but new since Y", compound findings, hedged temporal language).
+
+## What this means
+
+- **Judge is near-perfect** when fed real radiologist prose; we are not
+  hitting a 0.45-0.50 wall because of judge noise.
+- The MAIRA-2 baseline's 0.325 macro_acc and our best v6 0.383 reflect
+  genuine *report-quality* limits — even with a near-perfect grader,
+  MAIRA-2's generated reports lose ~65pp of the temporal signal that's
+  preserved in the original radiologist text.
+- This is a strong external validity check for the metric: the ~0.6 gap
+  between MAIRA-2 baseline and the judge ceiling is "stuff the model isn't
+  saying," not "stuff the judge is hallucinating."
+
+## Caveat
+
+Reports were reconstructed from ImaGenome's processed-sentences dump
+(`cxr-mimic-v2.0.0-processed-sentences_all.txt`), not the raw MIMIC-CXR
+report `.txt` files (which aren't in our local data). Sentence tokenization
++ whitespace collapse could introduce minor deviations, but the
+near-perfect judge agreement is itself a strong functional check — if
+key temporal sentences had been dropped or scrambled, the agreement would
+have cratered.
+
+## Files
+Script: `scripts/judge_gt_reports_mscxrt.py`
+Per-sample CSV: `results/maira2_og_metric_eval/gt_report_judge_gt_baseline_*.csv`
+Summary: `results/maira2_og_metric_eval/gt_report_judge_summary_gt_baseline_*.json`

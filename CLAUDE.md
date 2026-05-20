@@ -173,9 +173,22 @@ BioViL-T is a **temporal encoder** — it jointly encodes both images in a pair 
       Beats BioViL-T on pneumothorax (0.529 vs 0.508). Consolidation (0.223 vs 0.646) is
       now the dominant per-finding gap. Peaks at step 99 same as v5 (capacity → higher
       peak, not later peak). r=64 OOM'd at batch_prompts=2 on 24GB; would need bnb 8-bit
-      optimizer to scale further. Frozen-vision LoRA ceiling is *not* 0.36 — capacity
-      gains are real.
+      optimizer to scale further.
       See `docs/imagenome_rl_results.md` (third iteration section).
+- [x] MAIRA-2 v6a/v6b ablation (2026-05-20): split v6's two changes (rank 16→32, +projector)
+      to attribute the gain. **Neither alone reproduces v6.** v6a (r=32 LM only) best 0.341;
+      v6b (r=16 LM + projector) best 0.348; v6 (both) 0.383. The combo is +0.019 super-additive,
+      meaning projector gives LM new features *and* r=32 gives LM plasticity to use them —
+      either alone is marginal. Sharpens the case that vision-side bridge is the bottleneck
+      (task #30, v7: swap rad-DINO for BioViL-T encoder).
+      See `docs/imagenome_rl_results.md` (fourth iteration section).
+- [x] OG-judge ceiling check (2026-05-20): graded the original MIMIC-CXR radiologist reports
+      for all 315 MS-CXR-T val+test pairs with our 3-class judge. Agreement with MS-CXR-T
+      labels = **0.980** (7/315 disagreements, all genuinely ambiguous compound reports).
+      Confirms the 0.32–0.38 macro_acc range for generated reports reflects real
+      report-quality gaps, not judge noise — ~65pp of the temporal signal preserved in
+      human prose is missing from MAIRA-2 baseline outputs. See `docs/imagenome_rl_results.md`
+      (judge ceiling section).
 
 ### Task 2: Medical Device Classification
 - [ ] Radiologist labeling in progress (~1,600 images)

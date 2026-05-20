@@ -1,0 +1,87 @@
+# v6b: ablation — pure projector contribution, rank stays at v5's r=16.
+# See v6a header for the 2×2 design.
+
+model:
+  name: microsoft/maira-2
+  torch_dtype: float16
+  device: cuda:1
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+    - multi_modal_projector.layers.0
+    - multi_modal_projector.layers.2
+    - multi_modal_projector.layers.4
+    - multi_modal_projector.layers.6
+
+vision_lora:
+  enabled: false
+  last_n_layers: 6
+
+data:
+  prompts_dir: data/rl_prompts/imagenome
+  images_root: /data/mimic-cxr-jpg
+  pair_single_ratio: 1.0
+  stratify_by_finding: true
+  stratify_by_gt_progression: true
+  train_classes: [improving, worsening]
+
+prompting:
+  prompt_mode: specific
+  technique: "AP portable chest radiograph."
+  indication: ""
+
+sampling:
+  group_size: 4
+  max_new_tokens: 150
+  temperature: 0.9
+  top_p: 0.95
+
+reward:
+  alpha_label: 1.0
+  beta_no_compare: 0.0
+  partial_credit: false
+  change_weight: 1.0
+  stable_weight: 1.0
+  wrong_penalty: 1.0
+
+judge:
+  api: openai
+  model: gpt-4.1-mini
+  concurrency: 32
+  prompt_mode: 3class
+
+train:
+  num_steps: 150
+  batch_prompts: 2
+  lr: 5.0e-6
+  weight_decay: 0.0
+  kl_coef: 0.1
+  grad_clip: 1.0
+  ppo_clip: 0.2
+  ppo_epochs: 1
+  grad_checkpointing: true
+  logp_chunk_size: 2
+
+eval:
+  every_n_steps: 50
+  n_pair_eval: 100
+  n_single_eval: 0
+
+checkpoint:
+  dir: checkpoints/maira2_grpo_imagenome_v6b
+  save_every_n_steps: 50
+  keep_last_n: 5
+
+logging:
+  out_dir: results/maira2_grpo_imagenome_v6b
+  log_every_n_steps: 1
