@@ -189,6 +189,20 @@ BioViL-T is a **temporal encoder** — it jointly encodes both images in a pair 
       report-quality gaps, not judge noise — ~65pp of the temporal signal preserved in
       human prose is missing from MAIRA-2 baseline outputs. See `docs/imagenome_rl_results.md`
       (judge ceiling section).
+- [x] MAIRA-2 RL v7e (2026-05-20, negative result): swapped frozen rad-DINO for an ensemble
+      of 5 fine-tuned BioViL-T encoders (each ~0.6 macro_acc end-to-end on its own finding),
+      paired-mode forward, concat features (2560-d) → adapter → MAIRA-2 LM (r=32 LoRA +
+      projector). Two variants (with and without MSE-bootstrap of the adapter to rad-DINO
+      statistics) both collapsed to 100% "stable" predictions → MS-CXR-T macro_acc 0.333
+      (chance). The frozen-LM + new-encoder distribution shift is too deep for a single
+      Linear adapter to bridge; LoRA can't unblock it. v6 (0.383) remains the best.
+      Bridging to BioViL-T's 0.612 will require either end-to-end vision-encoder fine-tuning
+      or SFT of the LM on (image_pair → report) before RL — separate pipelines from the
+      GRPO+LoRA recipe. Negative result + diagnosis in `docs/imagenome_rl_results.md`
+      (fifth iteration section). Reusable improvements that landed:
+      `scripts/rl_maira2_temporal.py` gained a `vision_swap` swap-and-train path, an
+      adapter-bootstrap helper, and a NaN-gradient filter that prevents the silent
+      multinomial-assert death we hit in v7's first attempts.
 
 ### Task 2: Medical Device Classification
 - [ ] Radiologist labeling in progress (~1,600 images)

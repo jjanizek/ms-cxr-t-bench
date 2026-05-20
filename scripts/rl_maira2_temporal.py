@@ -243,6 +243,73 @@ def compute_reward(prompt_type: str, gt: str | None,
 
 
 # ============================================================
+# Adapter bootstrap: pre-align swap's adapter to mimic rad-DINO features
+# ============================================================
+
+def _run_adapter_bootstrap(model, processor, images_root, pair_pool,
+                            steps: int, lr: float, batch_pairs: int,
+                            device: str):
+    """MSE-align the swapped vision_tower's output to the original rad-DINO's.
+
+    Runs `steps` SGD updates on the *only-trainable* params of the new
+    vision_tower (adapter, prefix_token, out_norm), with rad-DINO features
+    as the regression target. Frees the cold-start trap that traps RL into
+    always-stable: after this, the LM sees something close to rad-DINO
+    statistics and produces non-degenerate text.
+    """
+    logger.info("Bootstrap: aligning swap-adapter to rad-DINO features for %d steps", steps)
+    new_tower = model.vision_tower if hasattr(model, "vision_tower") else None
+    if new_tower is None:
+        # Walk through PEFT wrappers if needed
+        base = getattr(model, "base_model", model)
+        base = getattr(base, "model", base)
+        new_tower = base.vision_tower
+    orig_tower = model._orig_vision_tower
+
+    bs_trainables = [p for p in new_tower.parameters() if p.requires_grad]
+    if not bs_trainables:
+        logger.warning("Bootstrap: no trainable params on new vision_tower; skipping.")
+        return
+    opt = torch.optim.AdamW(bs_trainables, lr=lr)
+
+    rng = np.random.default_rng(42)
+    losses = []
+    for s in range(steps):
+        # Sample `batch_pairs` prompts, load their pixel_values
+        idx = rng.choice(len(pair_pool), size=batch_pairs, replace=False)
+        prompts = [pair_pool[int(i)] for i in idx]
+        try:
+            batches = [build_inputs(processor, p, {"prompting": {"prompt_mode": "specific",
+                                                                  "indication": "",
+                                                                  "technique": "AP."}},
+                                    images_root) for p in prompts]
+        except FileNotFoundError as e:
+            continue
+        # Stack pixel_values
+        pv = torch.cat([to_device(b, device)["pixel_values"] for b in batches], dim=0)
+
+        with torch.no_grad():
+            target = orig_tower(pv).feature_maps[0]  # (B*2, 1370, 768) rad-DINO
+        pred = new_tower(pv).feature_maps[0]  # (B*2, 1370, 768)
+        loss = torch.nn.functional.mse_loss(pred.float(), target.float())
+
+        opt.zero_grad()
+        loss.backward()
+        # Replace any NaN grads with zero before stepping (safety, as in main loop)
+        for p in bs_trainables:
+            if p.grad is not None and not torch.isfinite(p.grad).all():
+                p.grad = torch.nan_to_num(p.grad, nan=0.0, posinf=0.0, neginf=0.0)
+        torch.nn.utils.clip_grad_norm_(bs_trainables, 1.0)
+        opt.step()
+        losses.append(float(loss))
+        if (s + 1) % 20 == 0 or s == 0:
+            logger.info("  bootstrap step %d  MSE=%.4f", s, np.mean(losses[-20:]))
+    logger.info("Bootstrap done. Final MSE=%.4f (start=%.4f)",
+                np.mean(losses[-20:]) if losses else float('nan'),
+                losses[0] if losses else float('nan'))
+
+
+# ============================================================
 # Model loading + LoRA wrapping
 # ============================================================
 
@@ -261,9 +328,53 @@ def load_model_and_processor(cfg: dict):
         torch_dtype=dtype, device_map={"": device},
     )
 
+    # Optional: swap the rad-DINO vision_tower for a different encoder. This
+    # runs BEFORE freezing so that the new module starts trainable; we re-mark
+    # the wrapper's adapter / prefix as trainable after the freeze below.
+    swap = cfg.get("vision_swap")
+    # Stash the original rad-DINO so a bootstrap can pre-align the adapter
+    # to mimic rad-DINO features (escape the cold-start where the LM defaults
+    # to "stable" because it sees garbage features).
+    orig_vision_tower = model.vision_tower if swap else None
+    if swap == "biovil_t":
+        from models.biovil_t_vision_tower import BioViLTVisionTower
+        new_tower = BioViLTVisionTower(
+            freeze_biovil=cfg.get("vision_swap_freeze_backbone", True),
+            target_dim=768,
+            dtype=dtype,
+        ).to(device)
+        model.vision_tower = new_tower
+        logger.info("Swapped vision_tower for BioViLTVisionTower.")
+    elif swap == "biovil_t_ensemble":
+        from models.biovil_t_ensemble_vision_tower import BioViLTEnsembleVisionTower
+        new_tower = BioViLTEnsembleVisionTower(
+            finding_ckpts=cfg["vision_swap_finding_ckpts"],
+            target_dim=768,
+            freeze_encoders=cfg.get("vision_swap_freeze_backbone", True),
+            dtype=dtype,
+        ).to(device)
+        model.vision_tower = new_tower
+        logger.info("Swapped vision_tower for BioViLTEnsembleVisionTower (%d encoders).",
+                    len(cfg["vision_swap_finding_ckpts"]))
+
     # Freeze everything; PEFT will unfreeze only LoRA params.
     for p in model.parameters():
         p.requires_grad = False
+
+    # If we swapped vision_tower, re-enable grads on the wrapper's *new*
+    # trainable params (the adapter Linear and the learned prefix token,
+    # plus BioViL-T itself if vision_swap_freeze_backbone=false).
+    if swap in ("biovil_t", "biovil_t_ensemble"):
+        unfrozen = 0
+        for n, p in model.vision_tower.named_parameters():
+            # adapter + prefix + out_norm are always trainable;
+            # biovil/encoders.* only if requested.
+            if n.startswith("adapter") or n == "prefix_token" or n.startswith("out_norm"):
+                p.requires_grad_(True); unfrozen += p.numel()
+            elif not cfg.get("vision_swap_freeze_backbone", True):
+                p.requires_grad_(True); unfrozen += p.numel()
+        logger.info("Vision swap: %d params marked trainable on the new vision_tower.",
+                    unfrozen)
 
     target_modules = list(cfg["lora"]["target_modules"])
 
@@ -285,10 +396,23 @@ def load_model_and_processor(cfg: dict):
         logger.info("Vision LoRA enabled on layers %d–%d (%d modules added).",
                     first, n_layers_total - 1, len(added))
 
+    # Keep new (swapped-in) vision-tower trainables alive through PEFT wrapping.
+    # PEFT's modules_to_save matches by substring of param names. We pass the
+    # full disambiguated paths so we don't accidentally re-enable LM modules
+    # or BioViL-T's frozen backbone.
+    modules_to_save = list(cfg["lora"].get("modules_to_save") or [])
+    if cfg.get("vision_swap") in ("biovil_t", "biovil_t_ensemble"):
+        modules_to_save.extend([
+            "vision_tower.adapter",
+            "vision_tower.prefix_token",
+            "vision_tower.out_norm",
+        ])
+
     lora = LoraConfig(
         r=cfg["lora"]["r"], lora_alpha=cfg["lora"]["alpha"],
         lora_dropout=cfg["lora"]["dropout"], bias="none",
         target_modules=target_modules,
+        modules_to_save=modules_to_save or None,
         task_type="CAUSAL_LM",
     )
     model = get_peft_model(model, lora)
@@ -310,6 +434,12 @@ def load_model_and_processor(cfg: dict):
             text_emb.register_forward_hook(_require_grad_hook)
             logger.info("Enabled gradient checkpointing + input-embeds grad hook.")
 
+    # Attach the original vision_tower as an attribute so the bootstrap
+    # phase can produce rad-DINO MSE targets without re-loading the model.
+    if orig_vision_tower is not None:
+        for p in orig_vision_tower.parameters():
+            p.requires_grad_(False)
+        model._orig_vision_tower = orig_vision_tower
     return model, processor
 
 
@@ -643,6 +773,27 @@ def main():
     optimizer = torch.optim.AdamW(trainable, lr=cfg["train"]["lr"],
                                    weight_decay=cfg["train"]["weight_decay"])
 
+    # Optional bootstrap: pre-align the swap's adapter to mimic rad-DINO
+    # features via MSE. Without this the LM gets garbage at step 0 and
+    # collapses to predicting "stable" (judge-default for noise), giving
+    # R=-1 across all rollouts and zero learning signal.
+    bs_cfg = cfg.get("bootstrap") or {}
+    if bs_cfg.get("steps", 0) > 0 and hasattr(model, "_orig_vision_tower"):
+        _run_adapter_bootstrap(
+            model, processor, images_root, train_pair,
+            steps=int(bs_cfg["steps"]),
+            lr=float(bs_cfg.get("lr", 1e-3)),
+            batch_pairs=int(bs_cfg.get("batch_pairs", 2)),
+            device=device,
+        )
+        # Bootstrap-only params get their own short-lived optimizer; reset the
+        # main AdamW now that the adapter is warm-started.
+        optimizer = torch.optim.AdamW(trainable, lr=cfg["train"]["lr"],
+                                       weight_decay=cfg["train"]["weight_decay"])
+        # Discard the original rad-DINO to free memory before RL starts.
+        del model._orig_vision_tower
+        torch.cuda.empty_cache()
+
     judge_prompt_mode = cfg["judge"].get("prompt_mode", "4class")  # "4class" | "3class"
     judge_sys_prompt = JUDGE_SYSTEM_PROMPT_3CLASS if judge_prompt_mode == "3class" else JUDGE_SYSTEM_PROMPT
     logger.info("Judge prompt mode: %s", judge_prompt_mode)
@@ -816,6 +967,17 @@ def main():
         step_kl = step_kl_sum / max(total_samples, 1)
 
         n_with_grad = sum(1 for p in trainable if p.grad is not None)
+        # Replace NaN/Inf in gradients with zeros before clipping. Without this
+        # one bad rollout (extreme logits → NaN log_pi → NaN grad) silently
+        # corrupts AdamW state and every subsequent generate() asserts inside
+        # torch.multinomial. Safer to drop the noisy step than to lose the run.
+        n_nan_grads = 0
+        for p in trainable:
+            if p.grad is not None and not torch.isfinite(p.grad).all():
+                n_nan_grads += 1
+                p.grad = torch.nan_to_num(p.grad, nan=0.0, posinf=0.0, neginf=0.0)
+        if n_nan_grads:
+            logger.warning("Zeroed NaN/Inf in %d/%d gradient tensors.", n_nan_grads, n_with_grad)
         gn = sum(float(p.grad.abs().sum()) for p in trainable if p.grad is not None)
         torch.nn.utils.clip_grad_norm_(trainable, grad_clip)
         optimizer.step()
@@ -854,6 +1016,16 @@ def main():
             save_dir = ckpt_dir / f"step_{step:06d}"
             model.save_pretrained(save_dir)
             logger.info("Saved adapter to %s", save_dir)
+            # If vision_tower was swapped, also save its full state dict so
+            # eval can reconstruct the encoder side. It's small (adapter +
+            # prefix + frozen BioViL-T weights ~100MB) and self-contained.
+            if cfg.get("vision_swap"):
+                base = getattr(model, "base_model", model)
+                base = getattr(base, "model", base)
+                torch.save(base.vision_tower.state_dict(),
+                           save_dir / "vision_tower.pt")
+                logger.info("Saved vision_tower state to %s/vision_tower.pt",
+                            save_dir)
 
             # Trim old checkpoints
             keep = cfg["checkpoint"]["keep_last_n"]

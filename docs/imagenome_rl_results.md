@@ -358,3 +358,79 @@ have cratered.
 Script: `scripts/judge_gt_reports_mscxrt.py`
 Per-sample CSV: `results/maira2_og_metric_eval/gt_report_judge_gt_baseline_*.csv`
 Summary: `results/maira2_og_metric_eval/gt_report_judge_summary_gt_baseline_*.json`
+
+---
+
+# Fifth iteration: v7e — fine-tuned BioViL-T ensemble as vision encoder (2026-05-20)
+
+v6a/v6b confirmed projector LoRA is half the lever and that the bottleneck is
+the frozen vision-side bridge. v7e tries the cleanest version of "give the
+vision side something better": swap MAIRA-2's frozen rad-DINO for an ensemble
+of 5 fine-tuned BioViL-T encoders (one per MS-CXR-T finding), each of which
+hits ~0.6 macro_acc when used standalone end-to-end on its own finding.
+
+## Setup
+- Vision tower: 5 frozen BioViL-T encoders, paired-mode forward (each image
+  encoded with the partner as temporal context), concat along channel dim →
+  (B, 2560, 14, 14)
+- Adapter: Linear(2560 → 768) + learned prefix token + LayerNorm (~2M
+  trainable, full FT via PEFT modules_to_save)
+- LM side: r=32 LoRA + multi_modal_projector targets (v6 config)
+- kl_coef=0 (reference policy ill-defined after vision-tower swap)
+- Optional MSE bootstrap to pre-align adapter to rad-DINO features (~200
+  SGD steps, ~1 min)
+- 100 RL training steps, eval every 50
+
+## Results
+
+| Config                       | step 49 MS-CXR-T | step 99 MS-CXR-T | In-training pred_dist (imp/stab/wors) |
+|------------------------------|------------------|------------------|---------------------------------------|
+| v7e — no bootstrap           | 0.333            | 0.333            | 0 / 100 / 0  (all stable)             |
+| v7e — MSE bootstrap (200 st) | 0.333            | 0.333            | 0 / 100 / 0  (all stable)             |
+| (reference) v6 step 99       | 0.383            | 0.383            | 21 / 44 / 35                          |
+| (reference) baseline         | 0.325            | 0.325            | n/a                                   |
+
+Both v7e variants collapsed to 100% "stable" predictions on the mixed-class
+in-training eval, giving the floor macro_acc of 0.333 (= 1/3, since the
+balanced accuracy of always-predict-stable is recall=1 on stable +
+recall=0 on imp + recall=0 on wors). RL had no advantage signal because
+under the change-only training subset every "stable" prediction gets R=-1,
+all rollouts identical, gradient zero (or NaN, which the new safety filter
+zeroed cleanly).
+
+## What this told us
+
+1. **The vision-tower swap is a deeper distribution shift than LoRA + a
+   2560→768 Linear adapter can bridge.** The fine-tuned BioViL-T encoders
+   know temporal structure, but feeding their features through a randomly
+   initialized adapter into the rad-DINO-trained LM produces garbage that
+   the LM defaults to "stable" on.
+2. **MSE-bootstrapping the adapter to rad-DINO statistics reduces KL** (6+
+   without bootstrap → ~3 with) and stabilizes step 0 numerically (no NaN
+   in logits), **but does not change the LM's text behavior** — the LM still
+   defaults to "stable" because the bootstrapped features are merely
+   *bounded*, not *informative* to the LM.
+3. **NaN-gradient filter** added to the main loop catches the case where one
+   bad rollout's log_pi is NaN and would corrupt AdamW state — without that
+   safety, every v7e variant crashed at step 2 with a `torch.multinomial`
+   assertion. This safety also benefits any future runs with new vision
+   towers.
+4. **Frozen-encoder LoRA has a real ceiling.** v6 (0.383) is roughly at the
+   limit of what frozen rad-DINO can support. Hitting the BioViL-T 0.612
+   ceiling genuinely requires either (a) end-to-end vision-encoder
+   fine-tuning, or (b) supervised fine-tuning of the LM on (image_pair →
+   report) pairs before RL — both of which are separate pipelines from the
+   GRPO+LoRA recipe we've been iterating on.
+
+## Files
+- New module: `models/biovil_t_ensemble_vision_tower.py`
+- Single-model variant (also tried, never escaped NaN cold-start):
+  `models/biovil_t_vision_tower.py`
+- Training-script changes: vision-swap path + bootstrap helper +
+  NaN-grad filter in `scripts/rl_maira2_temporal.py`
+- Configs: `configs/maira2_grpo_imagenome_v7.yaml`,
+  `configs/maira2_grpo_imagenome_v7e.yaml`
+- Eval configs: `configs/_eval_v7_mscxrt.yaml`, `configs/_eval_v7e_mscxrt.yaml`
+- Adapters: `checkpoints/maira2_grpo_imagenome_v7e/step_*/`
+- MS-CXR-T eval summaries:
+  `results/maira2_og_metric_eval/summary_v7e_*step*_*.json`

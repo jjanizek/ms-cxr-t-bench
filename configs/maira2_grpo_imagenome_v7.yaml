@@ -1,0 +1,107 @@
+# v7: swap MAIRA-2's frozen rad-DINO vision_tower for BioViL-T's image encoder.
+#
+# v6a/v6b ablation showed projector-LoRA is half the story (synergy with r=32
+# LM) but its lift is bottlenecked by the frozen rad-DINO features it has to
+# translate. v7 keeps v6's LoRA recipe (r=32 LM + projector targets + change-
+# only training) but replaces the vision tower itself with BioViL-T's
+# ResNet50/ViT-pooler encoder. The hope: BioViL-T's chest-X-ray-specific
+# pretraining gives the projector richer raw features → bigger ceiling.
+#
+# Single-image BioViL-T mode for this first run (cleanest A/B against v6).
+# Paired-mode (using the prior image as temporal context inside the encoder)
+# is a follow-up if v7 shows a gain.
+#
+# What's trainable:
+#   - BioViL-T encoder: FROZEN (default; vision_swap_freeze_backbone=true)
+#   - Adapter Linear(512→768) + learned 768-d prefix token: full FT (small)
+#   - multi_modal_projector Linears 0/2/4/6: LoRA r=32 (v6 config)
+#   - LM attn+MLP: LoRA r=32 (v6 config)
+# Expected trainable params: ~81M (LoRA) + ~400K (adapter+prefix) ≈ 81M.
+
+model:
+  name: microsoft/maira-2
+  torch_dtype: float16
+  device: cuda:1
+
+vision_swap: biovil_t
+vision_swap_freeze_backbone: true
+
+lora:
+  r: 32
+  alpha: 64
+  dropout: 0.05
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+    - multi_modal_projector.layers.0
+    - multi_modal_projector.layers.2
+    - multi_modal_projector.layers.4
+    - multi_modal_projector.layers.6
+
+vision_lora:
+  enabled: false
+  last_n_layers: 6
+
+data:
+  prompts_dir: data/rl_prompts/imagenome
+  images_root: /data/mimic-cxr-jpg
+  pair_single_ratio: 1.0
+  stratify_by_finding: true
+  stratify_by_gt_progression: true
+  train_classes: [improving, worsening]
+
+prompting:
+  prompt_mode: specific
+  technique: "AP portable chest radiograph."
+  indication: ""
+
+sampling:
+  group_size: 4
+  max_new_tokens: 150
+  temperature: 0.9
+  top_p: 0.95
+
+reward:
+  alpha_label: 1.0
+  beta_no_compare: 0.0
+  partial_credit: false
+  change_weight: 1.0
+  stable_weight: 1.0
+  wrong_penalty: 1.0
+
+judge:
+  api: openai
+  model: gpt-4.1-mini
+  concurrency: 32
+  prompt_mode: 3class
+
+train:
+  num_steps: 200
+  batch_prompts: 2
+  lr: 5.0e-6
+  weight_decay: 0.0
+  kl_coef: 0.0           # reference policy is ill-defined after vision-tower swap; disable KL
+  grad_clip: 1.0
+  ppo_clip: 0.2
+  ppo_epochs: 1
+  grad_checkpointing: true
+  logp_chunk_size: 2
+
+eval:
+  every_n_steps: 50
+  n_pair_eval: 100
+  n_single_eval: 0
+
+checkpoint:
+  dir: checkpoints/maira2_grpo_imagenome_v7
+  save_every_n_steps: 50
+  keep_last_n: 10
+
+logging:
+  out_dir: results/maira2_grpo_imagenome_v7
+  log_every_n_steps: 1

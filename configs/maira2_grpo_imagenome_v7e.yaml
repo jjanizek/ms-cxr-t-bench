@@ -1,0 +1,116 @@
+# v7e: swap rad-DINO for an ENSEMBLE of 5 fine-tuned BioViL-T encoders.
+#
+# Each per-finding BioViL-T was trained end-to-end on Chest ImaGenome temporal
+# pairs (train_biovil_t_imagenome.py) and reaches ~0.6 macro_acc when used
+# alone with its own MLP head. We freeze them, concat their paired-mode patch
+# features (5 × 512 = 2560 channels), then train an adapter + projector LoRA
+# + LM LoRA on top.
+#
+# Hypothesis: frozen-but-temporally-trained vision features are dramatically
+# richer than frozen rad-DINO. v6 (frozen rad-DINO, our recipe) = 0.383.
+# Frozen pretrained BioViL-T probe ≈ 0.36–0.40 per CLAUDE.md. If frozen
+# trained BioViL-T pushes us past 0.45, the trained-encoder hypothesis wins
+# and the next move is encoder-side LoRA on top of these.
+#
+# Wrapper uses paired-mode encoder calls (current=A,prev=B AND current=B,prev=A
+# per pair) so both image positions get temporally-aware features — without
+# that, we lose the entire point of BioViL-T's training.
+
+model:
+  name: microsoft/maira-2
+  torch_dtype: float16
+  device: cuda:1
+
+vision_swap: biovil_t_ensemble
+vision_swap_freeze_backbone: true
+vision_swap_finding_ckpts:
+  consolidation: checkpoints/biovil_t_imagenome/consolidation_seed42_best.pt
+  edema: checkpoints/biovil_t_imagenome/edema_seed42_best.pt
+  pleural_effusion: checkpoints/biovil_t_imagenome/pleural_effusion_seed42_best.pt
+  pneumonia: checkpoints/biovil_t_imagenome/pneumonia_seed42_best.pt
+  pneumothorax: checkpoints/biovil_t_imagenome/pneumothorax_seed42_best.pt
+
+lora:
+  r: 32
+  alpha: 64
+  dropout: 0.05
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+    - multi_modal_projector.layers.0
+    - multi_modal_projector.layers.2
+    - multi_modal_projector.layers.4
+    - multi_modal_projector.layers.6
+
+vision_lora:
+  enabled: false
+  last_n_layers: 6
+
+data:
+  prompts_dir: data/rl_prompts/imagenome
+  images_root: /data/mimic-cxr-jpg
+  pair_single_ratio: 1.0
+  stratify_by_finding: true
+  stratify_by_gt_progression: true
+  train_classes: [improving, worsening]
+
+prompting:
+  prompt_mode: specific
+  technique: "AP portable chest radiograph."
+  indication: ""
+
+sampling:
+  group_size: 4
+  max_new_tokens: 150
+  temperature: 0.9
+  top_p: 0.95
+
+reward:
+  alpha_label: 1.0
+  beta_no_compare: 0.0
+  partial_credit: false
+  change_weight: 1.0
+  stable_weight: 1.0
+  wrong_penalty: 1.0
+
+bootstrap:
+  steps: 200        # MSE-align adapter to rad-DINO features so LM sees familiar input
+  lr: 1.0e-3
+  batch_pairs: 2
+
+judge:
+  api: openai
+  model: gpt-4.1-mini
+  concurrency: 32
+  prompt_mode: 3class
+
+train:
+  num_steps: 200
+  batch_prompts: 2
+  lr: 5.0e-6
+  weight_decay: 0.0
+  kl_coef: 0.0           # reference policy ill-defined after vision-tower swap
+  grad_clip: 1.0
+  ppo_clip: 0.2
+  ppo_epochs: 1
+  grad_checkpointing: true
+  logp_chunk_size: 2
+
+eval:
+  every_n_steps: 50
+  n_pair_eval: 100
+  n_single_eval: 0
+
+checkpoint:
+  dir: checkpoints/maira2_grpo_imagenome_v7e
+  save_every_n_steps: 50
+  keep_last_n: 10
+
+logging:
+  out_dir: results/maira2_grpo_imagenome_v7e
+  log_every_n_steps: 1
