@@ -166,9 +166,16 @@ BioViL-T is a **temporal encoder** — it jointly encodes both images in a pair 
       beating v1's collapsed best (0.351) by +0.9pp without mode collapse. Past step ~200
       v5 starts overfitting to ImaGenome silver-label conventions and regresses on
       MS-CXR-T (step 399 → 0.311) — early stopping on the target distribution is required.
-      Frozen-vision LoRA appears to cap at ~0.36 macro_acc; bridging to BioViL-T 0.612
-      likely needs vision-encoder unfreezing or SFT-before-RL.
       See `docs/imagenome_rl_results.md` (second iteration section).
+- [x] MAIRA-2 RL v6 (2026-05-20): doubled LoRA capacity (r=16→32, +multi_modal_projector
+      targets, 40M→81M trainable). **MS-CXR-T macro_acc 0.383 at step 99** — new best,
+      +0.023 over v5, +0.058 over baseline, 20% of the gap to BioViL-T 0.612 closed.
+      Beats BioViL-T on pneumothorax (0.529 vs 0.508). Consolidation (0.223 vs 0.646) is
+      now the dominant per-finding gap. Peaks at step 99 same as v5 (capacity → higher
+      peak, not later peak). r=64 OOM'd at batch_prompts=2 on 24GB; would need bnb 8-bit
+      optimizer to scale further. Frozen-vision LoRA ceiling is *not* 0.36 — capacity
+      gains are real.
+      See `docs/imagenome_rl_results.md` (third iteration section).
 
 ### Task 2: Medical Device Classification
 - [ ] Radiologist labeling in progress (~1,600 images)

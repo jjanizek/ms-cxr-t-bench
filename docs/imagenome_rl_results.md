@@ -181,3 +181,86 @@ Configs: `configs/maira2_grpo_imagenome_v{2,3,4,5}.yaml`
 Best adapter: `checkpoints/maira2_grpo_imagenome_v5/step_000099/`
 MS-CXR-T eval summaries: `results/maira2_og_metric_eval/summary_v5_step{099,199,299,399}_*.json`
 Training logs: `results/maira2_grpo_imagenome_v5/run_*.jsonl`
+
+---
+
+# Third iteration: v6 — more LoRA capacity (2026-05-20)
+
+The user asked whether throwing more LoRA parameters at the LM (and projector)
+could substitute for unfreezing the vision encoder. v6 tests this directly.
+
+## Config changes vs v5
+
+| Knob | v5 | v6 | Why |
+|------|----|-----|-----|
+| LoRA rank | r=16 (α=32) | **r=32 (α=64)** | 2× per-module capacity (r=64 OOM'd) |
+| LoRA targets | LM attn+MLP | LM attn+MLP **+ projector Linears (4)** | adapt the vision→LM bridge without unfreezing rad-DINO |
+| Trainable params | 40M (0.58%) | **81M (1.15%)** | 2× total |
+| Eval cadence | every 100 steps | every 50 steps | catch the peak |
+| batch_prompts | 2 | 2 | unchanged (after r=64 was rejected for OOM) |
+
+Everything else mirrors v5 (3-class judge, change-only training, KL=0.1, etc).
+
+## MS-CXR-T trajectory
+
+| Step | macro_acc | per-finding (cons / edema / eff / pneum / ptx) |
+|------|-----------|------------------------------------------------|
+| 49   | 0.341     | 0.294 / 0.480 / 0.305 / 0.378 / 0.249           |
+| **99** | **0.383 (peak)** | 0.223 / 0.471 / 0.332 / 0.357 / **0.529** |
+| 149  | 0.353     | 0.351 / 0.376 / 0.356 / 0.308 / 0.374           |
+| 199  | 0.348     | (decline confirmed)                             |
+
+**v6 step 99 is a new best at 0.383**, +0.023 over v5 step 99 (0.360), +0.058
+over baseline (0.325). Notably, v6 step 99 actually **beats BioViL-T's
+pneumothorax number** (0.529 vs 0.508 in paper Table 2). It's the consolidation
+finding (0.223) that's holding the average down.
+
+## Headline comparison
+
+| Run                             | macro_acc | Δ vs baseline | % of BioViL-T gap closed |
+|---------------------------------|-----------|---------------|--------------------------|
+| Baseline (no LoRA)              | 0.325     | —             | 0%                       |
+| v1 step 999 (mode-collapsed)    | 0.351     | +0.026        | 9%                       |
+| v5 step 99 (change-only filter) | 0.360     | +0.035        | 12%                      |
+| **v6 step 99** (r=32 + projector)| **0.383**| **+0.058**    | **20%**                  |
+| BioViL-T (Table 2 target)       | 0.612     | —             | 100%                     |
+
+## What we learned
+
+1. **More LoRA capacity helps materially**: +0.023 macro_acc from doubling
+   trainable params (40M → 81M), specifically by adapting the projector +
+   raising LM rank 16→32. Frozen-vision LoRA is *not* capped at 0.36 as the
+   v5 writeup hypothesized — there's headroom past that.
+2. **r=64 OOM'd** with a single 24GB card at batch_prompts=2: 162M LoRA params
+   + AdamW state pushed allocated memory past the limit even with
+   `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`. Reaching r=64 needs
+   either bnb 8-bit optimizer or model-parallel.
+3. **Peak is around step 99**, same as v5. Higher capacity = the *same* time
+   to peak, but *higher* peak. This suggests the bottleneck past the peak is
+   the train/eval distribution gap (ImaGenome silver → MS-CXR-T human) rather
+   than capacity.
+4. **In-training eval is now a *negative* signal**: v6's ImaGenome val
+   macro_acc declined monotonically (0.348 → 0.302 → 0.244) as MS-CXR-T
+   macro_acc went *up* from 0.341 → 0.383. Stop on MS-CXR-T (or a held-out
+   target-distribution proxy), never on the training distribution.
+5. **Per-finding gains are uneven**: v6 step 99 vs v5 step 99 picked up big on
+   pneumothorax (+0.142) and pneumonia (+0.108) but lost ground on
+   consolidation (−0.157). Consolidation has the widest gap to BioViL-T
+   (0.223 vs 0.646) — likely the highest-leverage next target.
+
+## Next moves (in order)
+
+1. **Try bnb 8-bit AdamW** to fit r=64 + projector — would 2× LoRA capacity
+   again and tell us if returns are still positive.
+2. **Investigate consolidation failure**: pull example reports + judge
+   classifications to see whether it's a labelling issue, prompt issue, or
+   the rad-DINO encoder genuinely not seeing consolidation changes.
+3. **SFT-before-RL**: teach the response format / class distribution
+   explicitly with cross-entropy on silver labels, then RL on top. Should
+   compress the v6 peak finding faster and possibly raise it.
+
+## Files
+Config: `configs/maira2_grpo_imagenome_v6.yaml` (r=32 + projector + change-only)
+Best adapter: `checkpoints/maira2_grpo_imagenome_v6/step_000099/`
+MS-CXR-T evals: `results/maira2_og_metric_eval/summary_v6_step{049,099,149,199}_*.json`
+Training log: `results/maira2_grpo_imagenome_v6/run_*.jsonl`

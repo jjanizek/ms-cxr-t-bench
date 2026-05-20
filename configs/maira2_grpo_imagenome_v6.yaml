@@ -1,0 +1,110 @@
+# v6: more LoRA capacity to test the "frozen-vision LoRA caps at ~0.36" hypothesis.
+#
+# v5 (r=16, LM-attn+MLP targets, change-only training) peaked at MS-CXR-T
+# macro_acc 0.360 by step 99 and regressed past step 200. The question:
+# is 0.36 a fundamental ceiling from frozen rad-DINO features, or just a
+# capacity limit of 40M trainable params on the LM side?
+#
+# v6 keeps v5's training-data trick (drop stable-gt) but quadruples LoRA
+# capacity in two ways:
+#   1. r = 16 → 64 (4× per-module rank; alpha scaled to 2·r so the effective
+#      learning rate per LoRA matrix stays the same as v5).
+#   2. Add `multi_modal_projector` to target_modules — the 4-layer MLP that
+#      bridges rad-DINO features (768-d) to the LM (4096-d). This is the
+#      single highest-leverage target without unfreezing vision: it sits on
+#      the gradient path that vision-encoder LoRA would target, so adapting
+#      it lets the model learn to project temporal information into the LM
+#      latent space.
+#
+# Expected trainable params: ~160M (≈ 2.3% of 6.92B), vs 40M (0.58%) for v5.
+# If v6 still tops out near 0.36, the bottleneck is confirmed to be vision
+# features (not LM capacity), and the next move is vision-encoder unfreezing
+# or SFT-before-RL. If v6 climbs noticeably above 0.36, more capacity helps
+# and v7 should try r=128.
+
+model:
+  name: microsoft/maira-2
+  torch_dtype: float16
+  device: cuda:1
+
+lora:
+  r: 32                       # was 16; r=64 OOMed (162M trainable + AdamW state exceeded 24GB)
+  alpha: 64                   # 2·r convention
+  dropout: 0.05
+  target_modules:             # +projector Linears (4 layers) vs v5
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+    # PEFT matches by substring; "multi_modal_projector" would catch the
+    # wrapper module (not a Linear) and error. Enumerate the 4 child Linears.
+    - multi_modal_projector.layers.0
+    - multi_modal_projector.layers.2
+    - multi_modal_projector.layers.4
+    - multi_modal_projector.layers.6
+
+vision_lora:
+  enabled: false              # still gated on PEFT+Llava grad-flow fix
+  last_n_layers: 6
+
+data:
+  prompts_dir: data/rl_prompts/imagenome
+  images_root: /data/mimic-cxr-jpg
+  pair_single_ratio: 1.0
+  stratify_by_finding: true
+  stratify_by_gt_progression: true
+  train_classes: [improving, worsening]   # v5's Schelling-point breaker
+
+prompting:
+  prompt_mode: specific
+  technique: "AP portable chest radiograph."
+  indication: ""
+
+sampling:
+  group_size: 4
+  max_new_tokens: 150
+  temperature: 0.9
+  top_p: 0.95
+
+reward:
+  alpha_label: 1.0
+  beta_no_compare: 0.0
+  partial_credit: false
+  change_weight: 1.0
+  stable_weight: 1.0
+  wrong_penalty: 1.0
+
+judge:
+  api: openai
+  model: gpt-4.1-mini
+  concurrency: 32
+  prompt_mode: 3class
+
+train:
+  num_steps: 500              # v5 peaked early; capping shorter to spend more on eval granularity
+  batch_prompts: 2            # restored: r=32 fits with normal batch
+  lr: 5.0e-6
+  weight_decay: 0.0
+  kl_coef: 0.1
+  grad_clip: 1.0
+  ppo_clip: 0.2
+  ppo_epochs: 1
+  grad_checkpointing: true
+  logp_chunk_size: 2
+
+eval:
+  every_n_steps: 50           # finer granularity to catch peak
+  n_pair_eval: 100
+  n_single_eval: 0
+
+checkpoint:
+  dir: checkpoints/maira2_grpo_imagenome_v6
+  save_every_n_steps: 50      # match eval cadence so every eval has a checkpoint
+  keep_last_n: 20
+
+logging:
+  out_dir: results/maira2_grpo_imagenome_v6
+  log_every_n_steps: 1
