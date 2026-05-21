@@ -434,3 +434,124 @@ zeroed cleanly).
 - Adapters: `checkpoints/maira2_grpo_imagenome_v7e/step_*/`
 - MS-CXR-T eval summaries:
   `results/maira2_og_metric_eval/summary_v7e_*step*_*.json`
+
+---
+
+# Sixth iteration: v7e + SFT-then-RL (2026-05-20)
+
+The cold-start collapse in v7e (model defaults to one constant class because
+the LM has no idea what to do with the BioViL-T-ensemble features) led us to
+try the canonical fix: **supervised fine-tune the LM first** on
+(image_pair → full radiology report) using ImaGenome silver reports, then
+GRPO on top.
+
+## SFT pipeline
+- New script: `scripts/sft_maira2_temporal.py`
+- Loads MAIRA-2 + v7e's BioViL-T ensemble + the same modules_to_save adapter
+  scaffolding
+- For each pair prompt, joins the full radiologist report from ImaGenome's
+  processed-sentences dump (matched by `subject_id` + study_id parsed from
+  `current_file`); 8000 examples sampled from ~36k filtered pairs
+- CE on report tokens only (prompt prefix masked to -100), max_target=192,
+  batch=1, grad_checkpointing, lr=2e-5, 1000 steps
+- Wall time: 31 min on one GPU
+
+## SFT loss curve
+2.92 → 1.04 → ~1.0 plateau over 1000 steps. Model learned the format
+(`FINAL REPORT EXAMINATION: CHEST (PORTABLE AP) INDICATION: ___ ...`) and
+plausible radiology content. Stopped repeating tokens after ~step 300.
+
+## SFT alone on MS-CXR-T (step 999 checkpoint)
+
+| Avg macro_acc | 0.333 (chance) |
+|---|---|
+| Per-finding | all 0.333 |
+| Per-finding *predictions* | Each finding **always** gets the same class — but **a different constant per finding** |
+
+| Finding | Constant prediction |
+|---|---|
+| consolidation | always "improving" |
+| edema | always "stable" |
+| pleural_effusion | always "stable" |
+| pneumonia | always "stable" |
+| pneumothorax | always "worsening" |
+
+The LM learned to use the **finding name in the prompt** as a hash key to a
+finding-specific report template, rather than actually reading the image
+pair for temporal change. Each ensemble encoder was fine-tuned on its own
+finding's binary-change signal; concatenated, those features are nearly
+constant for a given finding, so the LM's best CE-minimising strategy is
+"output the most common report template for this finding."
+
+## SFT-then-RL trajectory (v7e_sft, 300 steps GRPO from SFT step 999)
+
+In-training (ImaGenome val, mixed-class):
+| Step | pred i/s/w | per_gt i/s/w | macro |
+|------|------------|--------------|-------|
+| 49   | 59 / 41 / 0 | 0.62 / 0.53 / 0   | 0.387 |
+| 99   | 2 / 98 / 0  | 0.00 / 0.98 / 0   | 0.326 |
+| 149  | 16 / 43 / 41 | 0.12 / 0.26 / 0.29 | 0.224 |
+| 199  | 0 / 100 / 0 | 0.00 / 1.00 / 0   | 0.333 |
+| 249  | 98 / 2 / 0  | 1.00 / 0.02 / 0   | 0.341 |
+
+Wild oscillation between modes — the kl_coef=0 (because the reference
+policy is meaningless after vision-tower swap) gives the policy no anchor.
+RL just shuffles the per-finding template assignments.
+
+MS-CXR-T evals (the actual target metric):
+| Checkpoint | MS-CXR-T macro_acc |
+|------------|--------------------|
+| step 49    | 0.333              |
+| step 99    | 0.333              |
+| step 149   | 0.333              |
+| (all show the same per-finding constant-prediction pattern, just with
+   different findings → different constants depending on RL drift) | |
+
+## Why this didn't work
+
+The ensemble of *finding-specific* BioViL-T encoders is the wrong feature
+extractor for a unified report-generation task. Each encoder was trained to
+distinguish "is THIS finding improving/stable/worsening?" — its features
+encode that one finding's temporal axis and not much else. Concatenating 5
+of them gives 2560 dims that are **near-constant within a finding**, so
+the most CE-efficient policy is "memorise the modal training report per
+finding." SFT taught the model exactly that shortcut, and RL had no way to
+escape it because the underlying features genuinely don't differentiate
+across image pairs within a finding.
+
+## What would actually fix this
+
+1. **A single unified BioViL-T trained on all 5 findings jointly** — features
+   would encode per-image temporal change, not per-finding category. Would
+   require ~1 hour of BioViL-T training (modifying
+   `scripts/train_biovil_t_imagenome.py` to use all findings).
+2. **End-to-end fine-tuning of the LM with the ensemble** — but that's
+   basically retraining MAIRA-2, and we don't have the data/compute scale
+   for that.
+3. **Fix the PEFT+Llava vision-LoRA grad-flow bug** so we can train
+   rad-DINO's own weights directly — the cleanest path to ~0.6, since that's
+   what BioViL-T did end-to-end.
+
+## Reusable bits that landed
+
+- `scripts/sft_maira2_temporal.py` — generic SFT script for MAIRA-2 with any
+  vision-tower swap. Uses our existing `load_model_and_processor`,
+  `build_inputs`, and PEFT modules_to_save plumbing. CE on target tokens
+  only. Includes the same NaN-grad filter the RL script gained.
+- `scripts/rl_maira2_temporal.py` gained `lr_groups` config support — pass
+  e.g. `train.lr_groups: {multi_modal_projector: 5e-5}` to give one
+  substring-matched group its own learning rate. Useful any time you want
+  to train different modules at different effective rates.
+- `configs/maira2_sft_imagenome_v7e.yaml`,
+  `configs/maira2_grpo_imagenome_v7e_sft.yaml`,
+  `configs/maira2_grpo_imagenome_v8.yaml`, plus matching eval configs.
+
+## Files
+- SFT script + config + adapter:
+  `scripts/sft_maira2_temporal.py`, `configs/maira2_sft_imagenome_v7e.yaml`,
+  `checkpoints/maira2_sft_v7e/step_*/`
+- SFT-then-RL config + adapter:
+  `configs/maira2_grpo_imagenome_v7e_sft.yaml`,
+  `checkpoints/maira2_grpo_imagenome_v7e_sft/step_*/`
+- Eval summaries: `results/maira2_og_metric_eval/summary_sft_v7e_*.json`,
+  `summary_v7e_sft_*.json`

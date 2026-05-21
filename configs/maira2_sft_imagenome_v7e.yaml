@@ -1,0 +1,69 @@
+# SFT warm-start for v7e: MAIRA-2 with BioViL-T ensemble vision tower
+# trained to generate the full MIMIC-CXR report given an image pair.
+# Output checkpoint will be loaded as `--resume` for the v7e RL run.
+
+model:
+  name: microsoft/maira-2
+  torch_dtype: float16
+  device: cuda:1
+
+vision_swap: biovil_t_ensemble
+vision_swap_freeze_backbone: true
+vision_swap_finding_ckpts:
+  consolidation: checkpoints/biovil_t_imagenome/consolidation_seed42_best.pt
+  edema: checkpoints/biovil_t_imagenome/edema_seed42_best.pt
+  pleural_effusion: checkpoints/biovil_t_imagenome/pleural_effusion_seed42_best.pt
+  pneumonia: checkpoints/biovil_t_imagenome/pneumonia_seed42_best.pt
+  pneumothorax: checkpoints/biovil_t_imagenome/pneumothorax_seed42_best.pt
+
+lora:
+  r: 32
+  alpha: 64
+  dropout: 0.05
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+    - multi_modal_projector.layers.0
+    - multi_modal_projector.layers.2
+    - multi_modal_projector.layers.4
+    - multi_modal_projector.layers.6
+
+vision_lora:
+  enabled: false
+  last_n_layers: 6
+
+data:
+  prompts_dir: data/rl_prompts/imagenome
+  images_root: /data/mimic-cxr-jpg
+  # Subsample so a single SFT pass is ~1-2 hours, not 6+
+  max_examples: 8000
+  seed: 42
+  # Keep the full mix (no train_classes filter) — we want the model to
+  # learn to *produce reports*, not bias predictions toward changes.
+
+prompting:
+  prompt_mode: specific
+  technique: "AP portable chest radiograph."
+  indication: ""
+
+train:
+  num_steps: 1000             # 8000 / batch=1 → 8 full passes; we'll stop early on val
+  batch_prompts: 1            # one report at a time (variable lengths blow batched memory)
+  lr: 2.0e-5                  # higher than RL — supervised signal is strong
+  weight_decay: 0.0
+  grad_clip: 1.0
+  max_target_tokens: 192      # shorter target reduces backward activation memory
+  grad_checkpointing: true
+
+checkpoint:
+  dir: checkpoints/maira2_sft_v7e
+  save_every_n_steps: 100
+  keep_last_n: 5
+
+logging:
+  out_dir: results/maira2_sft_v7e

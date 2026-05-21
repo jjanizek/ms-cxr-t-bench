@@ -769,9 +769,39 @@ def main():
         model.load_adapter(args.resume, adapter_name="default")
         logger.info("Resumed LoRA adapter from %s", args.resume)
 
-    trainable = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.AdamW(trainable, lr=cfg["train"]["lr"],
-                                   weight_decay=cfg["train"]["weight_decay"])
+    # Optional per-group learning rates. cfg["train"]["lr_groups"] is a dict
+    # of substring → lr; any trainable param whose name contains the
+    # substring gets that lr instead of the default. Used to give the
+    # projector LoRA (and any swapped-in vision adapter) a higher effective
+    # number of updates than the LM LoRA without destabilising the LM.
+    lr_default = float(cfg["train"]["lr"])
+    lr_groups = cfg["train"].get("lr_groups") or {}
+    if lr_groups:
+        param_groups = []
+        used = set()
+        for substr, lr_val in lr_groups.items():
+            group_params = []
+            for n, p in model.named_parameters():
+                if p.requires_grad and substr in n and id(p) not in used:
+                    group_params.append(p); used.add(id(p))
+            if group_params:
+                param_groups.append({"params": group_params, "lr": float(lr_val)})
+                logger.info("LR group '%s' (lr=%.2e): %d tensors",
+                            substr, float(lr_val), len(group_params))
+        # Default group: everything else
+        default_group = [p for n, p in model.named_parameters()
+                         if p.requires_grad and id(p) not in used]
+        param_groups.append({"params": default_group, "lr": lr_default})
+        logger.info("Default LR group (lr=%.2e): %d tensors",
+                    lr_default, len(default_group))
+        optimizer = torch.optim.AdamW(
+            param_groups, weight_decay=cfg["train"]["weight_decay"]
+        )
+        trainable = [p for g in param_groups for p in g["params"]]
+    else:
+        trainable = [p for p in model.parameters() if p.requires_grad]
+        optimizer = torch.optim.AdamW(trainable, lr=lr_default,
+                                       weight_decay=cfg["train"]["weight_decay"])
 
     # Optional bootstrap: pre-align the swap's adapter to mimic rad-DINO
     # features via MSE. Without this the LM gets garbage at step 0 and

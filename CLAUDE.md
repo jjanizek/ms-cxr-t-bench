@@ -203,6 +203,22 @@ BioViL-T is a **temporal encoder** — it jointly encodes both images in a pair 
       `scripts/rl_maira2_temporal.py` gained a `vision_swap` swap-and-train path, an
       adapter-bootstrap helper, and a NaN-gradient filter that prevents the silent
       multinomial-assert death we hit in v7's first attempts.
+- [x] SFT-then-RL on v7e (2026-05-20, negative result on MS-CXR-T): SFT'd MAIRA-2 + the
+      BioViL-T ensemble on 8000 (image_pair → full radiologist report) examples from
+      ImaGenome silver labels for 1000 steps (CE loss 2.92 → 1.04). SFT alone hit
+      **MS-CXR-T 0.333** with a per-finding constant-prediction pattern: consolidation
+      → always "improving", edema/effusion/pneumonia → always "stable", pneumothorax
+      → always "worsening". The LM learned to use the finding name as a hash key to a
+      per-finding report template because the ensemble's finding-specific encoders
+      produce near-constant features within a finding. 300 steps of GRPO on top of SFT
+      (`v7e_sft`) showed wild oscillation between collapsed modes (steps 49/99/149/199/249
+      each picked a different per-finding template assignment) — all MS-CXR-T evals = 0.333.
+      v6 (0.383) remains the best result. Reusable: `scripts/sft_maira2_temporal.py`
+      (CE SFT with any vision-tower swap), `lr_groups` in the RL script. Full diagnosis
+      in `docs/imagenome_rl_results.md` (sixth iteration section).
+- [x] v8 (2026-05-20, killed early to free GPU): v6 + asymmetric LR (10× on projector LoRA,
+      1× on LM LoRA) via `lr_groups` config. Ran 99 steps then killed to free GPU 1 for
+      v7e_sft evaluations. Not completed.
 
 ### Task 2: Medical Device Classification
 - [ ] Radiologist labeling in progress (~1,600 images)
